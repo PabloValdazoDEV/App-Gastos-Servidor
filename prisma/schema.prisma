@@ -1,0 +1,674 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum OAuthProvider {
+  GOOGLE
+}
+
+enum LegalDocumentType {
+  PRIVACY_POLICY
+}
+
+enum LegalAcceptanceSource {
+  REGISTRATION
+}
+
+enum HouseholdRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  REVOKED
+  EXPIRED
+}
+
+enum ContributionMode {
+  PERCENTAGE
+  FIXED
+}
+
+enum ExpenseScope {
+  HOUSEHOLD
+  PERSONAL
+}
+
+enum ExpenseFrequency {
+  WEEKLY
+  MONTHLY
+  BIMONTHLY
+  QUARTERLY
+  SEMIANNUAL
+  YEARLY
+  CUSTOM_MONTHS
+  ONE_TIME
+}
+
+enum PaymentStatus {
+  PAID
+  SKIPPED
+}
+
+enum NextAmountDecision {
+  KEEP_PREVIOUS
+  UPDATE_NEXT_AMOUNT
+}
+
+enum VariableEntryMode {
+  DETAIL
+  SUMMARY
+}
+
+enum PlanningFundingStatus {
+  PREPARED
+  FUNDED
+}
+
+enum FinancialStatus {
+  OK
+  ATTENTION
+  DEFICIT
+  PAYMENT_RISK
+}
+
+enum RecoveryPlanMode {
+  TARGET_MONTHS
+  MAX_MONTHLY
+  RECOMMENDED
+}
+
+enum RecoveryPlanStatus {
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum NotificationChannel {
+  IN_APP
+  EMAIL
+  WEB_PUSH
+}
+
+enum NotificationDeliveryStatus {
+  PENDING
+  PROCESSING
+  SENT
+  FAILED
+  SKIPPED
+}
+
+enum BalanceSnapshotSource {
+  MANUAL
+  MONTHLY_PREPARATION
+  PAYMENT
+}
+
+enum AuditAction {
+  REGISTER
+  LOGIN
+  LOGOUT
+  PASSWORD_CHANGED
+  HOUSEHOLD_CREATED
+  HOUSEHOLD_CHANGED
+  HOUSEHOLD_DELETED
+  OWNERSHIP_TRANSFERRED
+  INVITATION_CREATED
+  INVITATION_REVOKED
+  MEMBER_LINKED
+  ACCESS_CHANGED
+  CATEGORY_CREATED
+  CATEGORY_CHANGED
+  EXPENSE_CREATED
+  EXPENSE_CHANGED
+  EXPENSE_DELETED
+  PAYMENT_REGISTERED
+  BALANCE_CHANGED
+  MONTH_PREPARED
+  RECOVERY_PLAN_CHANGED
+  NOTIFICATION_PREFERENCE_CHANGED
+}
+
+model User {
+  id                     String                     @id @default(uuid()) @db.Uuid
+  email                  String                     @unique @db.VarChar(320)
+  passwordHash           String?                    @db.VarChar(255)
+  name                   String                     @db.VarChar(120)
+  emailVerifiedAt        DateTime?
+  isActive               Boolean                    @default(true)
+  timezone               String                     @default("Europe/Madrid") @db.VarChar(64)
+  locale                 String                     @default("es-ES") @db.VarChar(16)
+  createdAt              DateTime                   @default(now())
+  updatedAt              DateTime                   @updatedAt
+  oauthAccounts          OAuthAccount[]
+  refreshSessions        RefreshSession[]
+  passwordResetTokens    PasswordResetToken[]
+  legalDocumentAcceptances LegalDocumentAcceptance[]
+  ownedHouseholds        Household[]                @relation("HouseholdOwner")
+  linkedHouseholdPeople  HouseholdPerson[]          @relation("LinkedHouseholdUser")
+  householdAccesses      HouseholdUserAccess[]
+  invitationsSent        Invitation[]               @relation("InvitationInviter")
+  invitationsAccepted    Invitation[]               @relation("InvitationAccepter")
+  balanceSnapshots       HouseholdBalanceSnapshot[] @relation("BalanceSnapshotRecorder")
+  preparedPlannings      MonthlyPlanning[]          @relation("PlanningPreparer")
+  recoveryPlansCreated   RecoveryPlan[]             @relation("RecoveryPlanCreator")
+  paymentsRecorded       ExpensePayment[]           @relation("PaymentRecorder")
+  invoiceDocumentsUploaded InvoiceDocument[]        @relation("InvoiceDocumentUploader")
+  notificationPreference NotificationPreference?
+  reminderRules          ReminderRule[]
+  notifications          Notification[]
+  pushSubscriptions      PushSubscription[]
+  auditLogs              AuditLog[]                 @relation("AuditActor")
+}
+
+model OAuthAccount {
+  id                String        @id @default(uuid()) @db.Uuid
+  userId            String        @db.Uuid
+  provider          OAuthProvider
+  providerAccountId String        @db.VarChar(255)
+  providerEmail     String?       @db.VarChar(320)
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  user              User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@unique([userId, provider])
+  @@index([userId])
+}
+
+model RefreshSession {
+  id                   String          @id @default(uuid()) @db.Uuid
+  userId               String          @db.Uuid
+  tokenHash            String          @unique @db.Char(64)
+  familyId             String          @db.Uuid
+  rotatedFromSessionId String?         @unique @db.Uuid
+  expiresAt            DateTime
+  lastUsedAt           DateTime?
+  revokedAt            DateTime?
+  revocationReason     String?         @db.VarChar(120)
+  ipAddressHash        String?         @db.Char(64)
+  userAgent            String?         @db.VarChar(512)
+  createdAt            DateTime        @default(now())
+  user                 User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rotatedFrom          RefreshSession? @relation("SessionRotation", fields: [rotatedFromSessionId], references: [id], onDelete: SetNull)
+  rotatedTo            RefreshSession? @relation("SessionRotation")
+
+  @@index([userId, expiresAt])
+  @@index([familyId, revokedAt])
+}
+
+model PasswordResetToken {
+  id              String    @id @default(uuid()) @db.Uuid
+  userId          String    @db.Uuid
+  tokenHash       String    @unique @db.Char(64)
+  expiresAt       DateTime
+  usedAt          DateTime?
+  revokedAt       DateTime?
+  requestedIpHash String?   @db.Char(64)
+  createdAt       DateTime  @default(now())
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+}
+
+model LegalDocumentAcceptance {
+  id              String                @id @default(uuid()) @db.Uuid
+  userId          String                @db.Uuid
+  documentType    LegalDocumentType
+  documentVersion String                @db.VarChar(120)
+  acceptedAt      DateTime              @default(now()) @db.Timestamptz(3)
+  source          LegalAcceptanceSource
+  createdAt       DateTime              @default(now()) @db.Timestamptz(3)
+  user            User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, documentType, documentVersion])
+  @@index([userId, acceptedAt])
+}
+
+model Household {
+  id                    String                     @id @default(uuid()) @db.Uuid
+  ownerUserId           String                     @db.Uuid
+  name                  String                     @db.VarChar(120)
+  currency              String                     @default("EUR") @db.Char(3)
+  timezone              String                     @default("Europe/Madrid") @db.VarChar(64)
+  locale                String                     @default("es-ES") @db.VarChar(16)
+  contributionMode      ContributionMode           @default(PERCENTAGE)
+  safetyMarginBps       Int                        @default(1000)
+  contributionDay       Int                        @default(1)
+  currentBalanceCents   Int                        @default(0)
+  isActive              Boolean                    @default(true)
+  createdAt             DateTime                   @default(now())
+  updatedAt             DateTime                   @updatedAt
+  owner                 User                       @relation("HouseholdOwner", fields: [ownerUserId], references: [id], onDelete: Restrict)
+  people                HouseholdPerson[]
+  accesses              HouseholdUserAccess[]
+  invitations           Invitation[]
+  categories            Category[]
+  recurringExpenses     RecurringExpense[]
+  utilityInvoices       UtilityInvoice[]
+  variableExpenseMonths VariableExpenseMonth[]
+  balanceSnapshots      HouseholdBalanceSnapshot[]
+  monthlyPlannings      MonthlyPlanning[]
+  recoveryPlans         RecoveryPlan[]
+  notifications         Notification[]
+  auditLogs             AuditLog[]
+
+  @@index([ownerUserId])
+}
+
+model HouseholdPerson {
+  id                     String                        @id @default(uuid()) @db.Uuid
+  householdId            String                        @db.Uuid
+  linkedUserId           String?                       @db.Uuid
+  name                   String                        @db.VarChar(120)
+  email                  String?                       @db.VarChar(320)
+  contributionBps        Int                           @default(0)
+  fixedContributionCents Int?
+  isActive               Boolean                       @default(true)
+  archivedAt             DateTime?
+  createdAt              DateTime                      @default(now())
+  updatedAt              DateTime                      @updatedAt
+  household              Household                     @relation(fields: [householdId], references: [id], onDelete: Restrict)
+  linkedUser             User?                         @relation("LinkedHouseholdUser", fields: [linkedUserId], references: [id], onDelete: SetNull)
+  invitations            Invitation[]
+  personalExpenses       RecurringExpense[]            @relation("PersonalRecurringExpense")
+  variableExpenseMonths  VariableExpenseMonth[]        @relation("PersonalVariableExpense")
+  planningContributions  MonthlyPlanningContribution[]
+
+  @@unique([householdId, linkedUserId])
+  @@index([householdId, isActive])
+  @@index([householdId, email])
+}
+
+model HouseholdUserAccess {
+  id          String        @id @default(uuid()) @db.Uuid
+  householdId String        @db.Uuid
+  userId      String        @db.Uuid
+  role        HouseholdRole @default(MEMBER)
+  isActive    Boolean       @default(true)
+  revokedAt   DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  household   Household     @relation(fields: [householdId], references: [id], onDelete: Restrict)
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([householdId, userId])
+  @@index([userId, isActive])
+  @@index([householdId, role])
+}
+
+model Invitation {
+  id                String           @id @default(uuid()) @db.Uuid
+  householdId       String           @db.Uuid
+  householdPersonId String?          @db.Uuid
+  invitedByUserId   String           @db.Uuid
+  acceptedByUserId  String?          @db.Uuid
+  email             String?          @db.VarChar(320)
+  role              HouseholdRole    @default(MEMBER)
+  status            InvitationStatus @default(PENDING)
+  tokenHash         String           @unique @db.Char(64)
+  expiresAt         DateTime
+  acceptedAt        DateTime?
+  revokedAt         DateTime?
+  createdAt         DateTime         @default(now())
+  household         Household        @relation(fields: [householdId], references: [id], onDelete: Restrict)
+  householdPerson   HouseholdPerson? @relation(fields: [householdPersonId], references: [id], onDelete: SetNull)
+  invitedBy         User             @relation("InvitationInviter", fields: [invitedByUserId], references: [id], onDelete: Restrict)
+  acceptedBy        User?            @relation("InvitationAccepter", fields: [acceptedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([householdId, status, expiresAt])
+  @@index([email, status])
+}
+
+model Category {
+  id                    String                 @id @default(uuid()) @db.Uuid
+  householdId           String                 @db.Uuid
+  name                  String                 @db.VarChar(80)
+  slug                  String                 @db.VarChar(100)
+  icon                  String                 @db.VarChar(64)
+  color                 String                 @db.VarChar(32)
+  safetyMarginBps       Int?
+  isDefault             Boolean                @default(false)
+  archivedAt            DateTime?
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+  household             Household              @relation(fields: [householdId], references: [id], onDelete: Restrict)
+  recurringExpenses     RecurringExpense[]
+  utilityInvoices       UtilityInvoice[]
+  variableExpenseMonths VariableExpenseMonth[]
+
+  @@unique([householdId, slug])
+  @@index([householdId, archivedAt])
+}
+
+model RecurringExpense {
+  id                      String           @id @default(uuid()) @db.Uuid
+  householdId             String           @db.Uuid
+  categoryId              String           @db.Uuid
+  personalPersonId        String?          @db.Uuid
+  name                    String           @db.VarChar(120)
+  amountCents             Int
+  scope                   ExpenseScope     @default(HOUSEHOLD)
+  frequency               ExpenseFrequency
+  intervalMonths          Int?
+  startDate               DateTime         @db.Date
+  endDate                 DateTime?        @db.Date
+  nextDueDate             DateTime         @db.Date
+  usualDayOfMonth         Int?
+  safetyMarginOverrideBps Int?
+  remindersEnabled        Boolean          @default(true)
+  notes                   String?          @db.VarChar(2000)
+  isActive                Boolean          @default(true)
+  archivedAt              DateTime?
+  createdAt               DateTime         @default(now())
+  updatedAt               DateTime         @updatedAt
+  household               Household        @relation(fields: [householdId], references: [id], onDelete: Restrict)
+  category                Category         @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  personalPerson          HouseholdPerson? @relation("PersonalRecurringExpense", fields: [personalPersonId], references: [id], onDelete: Restrict)
+  payments                ExpensePayment[]
+  reminderRules           ReminderRule[]
+  notifications           Notification[]
+
+  @@index([householdId, isActive, nextDueDate])
+  @@index([categoryId])
+  @@index([personalPersonId])
+}
+
+model ExpensePayment {
+  id                      String             @id @default(uuid()) @db.Uuid
+  recurringExpenseId      String             @db.Uuid
+  recordedByUserId        String             @db.Uuid
+  dueDate                 DateTime           @db.Date
+  expectedAmountCents     Int
+  actualAmountCents       Int?
+  paymentDate             DateTime?          @db.Date
+  status                  PaymentStatus
+  nextAmountDecision      NextAmountDecision @default(KEEP_PREVIOUS)
+  nextExpectedAmountCents Int?
+  notes                   String?            @db.VarChar(2000)
+  createdAt               DateTime           @default(now())
+  updatedAt               DateTime           @updatedAt
+  recurringExpense        RecurringExpense   @relation(fields: [recurringExpenseId], references: [id], onDelete: Restrict)
+  recordedBy              User               @relation("PaymentRecorder", fields: [recordedByUserId], references: [id], onDelete: Restrict)
+
+  @@unique([recurringExpenseId, dueDate])
+  @@index([dueDate, status])
+  @@index([recordedByUserId])
+}
+
+model UtilityInvoice {
+  id          String            @id @default(uuid()) @db.Uuid
+  householdId String            @db.Uuid
+  categoryId  String            @db.Uuid
+  amountCents Int
+  periodStart DateTime          @db.Date
+  periodEnd   DateTime          @db.Date
+  invoiceDate DateTime          @db.Date
+  chargeDate  DateTime?         @db.Date
+  notes       String?           @db.VarChar(2000)
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+  household   Household         @relation(fields: [householdId], references: [id], onDelete: Restrict)
+  category    Category          @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  documents   InvoiceDocument[]
+
+  @@index([householdId, categoryId, periodEnd])
+  @@index([householdId, chargeDate])
+}
+
+model InvoiceDocument {
+  id               String         @id @default(uuid()) @db.Uuid
+  invoiceId        String         @db.Uuid
+  uploadedByUserId String?        @db.Uuid
+  filename         String         @db.VarChar(255)
+  contentType      String         @db.VarChar(64)
+  sizeBytes        Int
+  content          Bytes          @db.ByteA
+  createdAt        DateTime       @default(now())
+  invoice          UtilityInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  uploadedBy       User?          @relation("InvoiceDocumentUploader", fields: [uploadedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([invoiceId, createdAt])
+  @@index([uploadedByUserId])
+}
+
+model VariableExpenseMonth {
+  id                 String                 @id @default(uuid()) @db.Uuid
+  householdId        String                 @db.Uuid
+  categoryId         String                 @db.Uuid
+  personalPersonId   String?                @db.Uuid
+  ownerKey           String                 @db.VarChar(40)
+  scope              ExpenseScope           @default(HOUSEHOLD)
+  year               Int
+  month              Int
+  entryMode          VariableEntryMode
+  summaryAmountCents Int?
+  isComplete         Boolean                @default(true)
+  notes              String?                @db.VarChar(2000)
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+  household          Household              @relation(fields: [householdId], references: [id], onDelete: Restrict)
+  category           Category               @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  personalPerson     HouseholdPerson?       @relation("PersonalVariableExpense", fields: [personalPersonId], references: [id], onDelete: Restrict)
+  entries            VariableExpenseEntry[]
+
+  @@unique([householdId, categoryId, ownerKey, year, month])
+  @@index([householdId, year, month])
+  @@index([personalPersonId])
+}
+
+model VariableExpenseEntry {
+  id                     String               @id @default(uuid()) @db.Uuid
+  variableExpenseMonthId String               @db.Uuid
+  spentOn                DateTime             @db.Date
+  merchant               String?              @db.VarChar(120)
+  amountCents            Int
+  notes                  String?              @db.VarChar(1000)
+  createdAt              DateTime             @default(now())
+  updatedAt              DateTime             @updatedAt
+  variableExpenseMonth   VariableExpenseMonth @relation(fields: [variableExpenseMonthId], references: [id], onDelete: Restrict)
+
+  @@index([variableExpenseMonthId, spentOn])
+}
+
+model HouseholdBalanceSnapshot {
+  id                String                @id @default(uuid()) @db.Uuid
+  householdId       String                @db.Uuid
+  recordedByUserId  String                @db.Uuid
+  monthlyPlanningId String?               @unique @db.Uuid
+  balanceCents      Int
+  source            BalanceSnapshotSource @default(MANUAL)
+  recordedAt        DateTime              @default(now())
+  household         Household             @relation(fields: [householdId], references: [id], onDelete: Restrict)
+  recordedBy        User                  @relation("BalanceSnapshotRecorder", fields: [recordedByUserId], references: [id], onDelete: Restrict)
+  monthlyPlanning   MonthlyPlanning?      @relation(fields: [monthlyPlanningId], references: [id], onDelete: SetNull)
+
+  @@index([householdId, recordedAt])
+}
+
+model MonthlyPlanning {
+  id                            String                        @id @default(uuid()) @db.Uuid
+  householdId                   String                        @db.Uuid
+  preparedByUserId              String                        @db.Uuid
+  year                          Int
+  month                         Int
+  calculationDate               DateTime                      @db.Date
+  confirmedBalanceCents         Int
+  recommendedBudgetCents        Int
+  householdBudgetCents          Int
+  theoreticalReserveCents       Int
+  relevantAvailableBalanceCents Int
+  deficitCents                  Int
+  financialStatus               FinancialStatus
+  calculationVersion            String                        @default("v1") @db.VarChar(20)
+  breakdown                     Json?
+  fundingStatus                 PlanningFundingStatus         @default(PREPARED)
+  preparedAt                    DateTime                      @default(now())
+  fundedAt                      DateTime?
+  createdAt                     DateTime                      @default(now())
+  updatedAt                     DateTime                      @updatedAt
+  household                     Household                     @relation(fields: [householdId], references: [id], onDelete: Restrict)
+  preparedBy                    User                          @relation("PlanningPreparer", fields: [preparedByUserId], references: [id], onDelete: Restrict)
+  contributions                 MonthlyPlanningContribution[]
+  recoveryPlans                 RecoveryPlan[]
+  balanceSnapshot               HouseholdBalanceSnapshot?
+
+  @@unique([householdId, year, month])
+  @@index([householdId, preparedAt])
+}
+
+model MonthlyPlanningContribution {
+  id                       String          @id @default(uuid()) @db.Uuid
+  monthlyPlanningId        String          @db.Uuid
+  householdPersonId        String          @db.Uuid
+  personName               String          @db.VarChar(120)
+  contributionBps          Int
+  standardHouseholdCents   Int
+  personalExpenseCents     Int
+  temporaryAdjustmentCents Int             @default(0)
+  totalRecommendedCents    Int
+  createdAt                DateTime        @default(now())
+  monthlyPlanning          MonthlyPlanning @relation(fields: [monthlyPlanningId], references: [id], onDelete: Restrict)
+  householdPerson          HouseholdPerson @relation(fields: [householdPersonId], references: [id], onDelete: Restrict)
+
+  @@unique([monthlyPlanningId, householdPersonId])
+  @@index([householdPersonId])
+}
+
+model RecoveryPlan {
+  id                     String             @id @default(uuid()) @db.Uuid
+  householdId            String             @db.Uuid
+  monthlyPlanningId      String?            @db.Uuid
+  createdByUserId        String             @db.Uuid
+  mode                   RecoveryPlanMode
+  status                 RecoveryPlanStatus @default(ACTIVE)
+  initialDeficitCents    Int
+  remainingDeficitCents  Int
+  targetMonths           Int?
+  maximumMonthlyCents    Int?
+  monthlyAdjustmentCents Int
+  startsOn               DateTime           @db.Date
+  targetCompletionDate   DateTime?          @db.Date
+  completedAt            DateTime?
+  cancelledAt            DateTime?
+  createdAt              DateTime           @default(now())
+  updatedAt              DateTime           @updatedAt
+  household              Household          @relation(fields: [householdId], references: [id], onDelete: Restrict)
+  monthlyPlanning        MonthlyPlanning?   @relation(fields: [monthlyPlanningId], references: [id], onDelete: SetNull)
+  createdBy              User               @relation("RecoveryPlanCreator", fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  @@index([householdId, status])
+  @@index([monthlyPlanningId])
+}
+
+model NotificationPreference {
+  id             String   @id @default(uuid()) @db.Uuid
+  userId         String   @unique @db.Uuid
+  inAppEnabled   Boolean  @default(true)
+  emailEnabled   Boolean  @default(true)
+  webPushEnabled Boolean  @default(false)
+  defaultOffsets Int[]    @default([30, 7, 1])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model ReminderRule {
+  id                 String              @id @default(uuid()) @db.Uuid
+  userId             String              @db.Uuid
+  recurringExpenseId String              @db.Uuid
+  offsetDays         Int
+  channel            NotificationChannel
+  enabled            Boolean             @default(true)
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  user               User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  recurringExpense   RecurringExpense    @relation(fields: [recurringExpenseId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, recurringExpenseId, offsetDays, channel])
+  @@index([recurringExpenseId, enabled])
+}
+
+model Notification {
+  id                 String                 @id @default(uuid()) @db.Uuid
+  householdId        String                 @db.Uuid
+  userId             String                 @db.Uuid
+  recurringExpenseId String                 @db.Uuid
+  dueDate            DateTime               @db.Date
+  offsetDays         Int
+  title              String                 @db.VarChar(160)
+  message            String                 @db.VarChar(1000)
+  relatedPath        String?                @db.VarChar(500)
+  readAt             DateTime?
+  createdAt          DateTime               @default(now())
+  household          Household              @relation(fields: [householdId], references: [id], onDelete: Restrict)
+  user               User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  recurringExpense   RecurringExpense       @relation(fields: [recurringExpenseId], references: [id], onDelete: Restrict)
+  deliveries         NotificationDelivery[]
+
+  @@unique([userId, recurringExpenseId, dueDate, offsetDays])
+  @@index([userId, readAt, createdAt])
+  @@index([householdId, createdAt])
+}
+
+model NotificationDelivery {
+  id             String                     @id @default(uuid()) @db.Uuid
+  notificationId String                     @db.Uuid
+  channel        NotificationChannel
+  status         NotificationDeliveryStatus @default(PENDING)
+  attempts       Int                        @default(0)
+  lastAttemptAt  DateTime?
+  nextAttemptAt  DateTime?
+  lockedAt       DateTime?
+  lockedBy       String?                    @db.VarChar(100)
+  sentAt         DateTime?
+  errorCode      String?                    @db.VarChar(120)
+  createdAt      DateTime                   @default(now())
+  updatedAt      DateTime                   @updatedAt
+  notification   Notification               @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+
+  @@unique([notificationId, channel], map: "notification_delivery_reminder_key")
+  @@index([status, nextAttemptAt])
+}
+
+model PushSubscription {
+  id           String    @id @default(uuid()) @db.Uuid
+  userId       String    @db.Uuid
+  endpointHash String    @unique @db.Char(64)
+  endpoint     String    @db.Text
+  p256dh       String    @db.Text
+  auth         String    @db.Text
+  userAgent    String?   @db.VarChar(512)
+  expiresAt    DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model AuditLog {
+  id            String      @id @default(uuid()) @db.Uuid
+  actorUserId   String?     @db.Uuid
+  householdId   String?     @db.Uuid
+  action        AuditAction
+  resourceType  String?     @db.VarChar(80)
+  resourceId    String?     @db.VarChar(64)
+  metadata      Json?
+  ipAddressHash String?     @db.Char(64)
+  createdAt     DateTime    @default(now())
+  actor         User?       @relation("AuditActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+  household     Household?  @relation(fields: [householdId], references: [id], onDelete: SetNull)
+
+  @@index([householdId, createdAt])
+  @@index([actorUserId, createdAt])
+  @@index([action, createdAt])
+}

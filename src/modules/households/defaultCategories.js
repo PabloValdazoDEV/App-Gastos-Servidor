@@ -1,0 +1,35 @@
+export const DEFAULT_CATEGORIES = Object.freeze([
+  { name: 'Vivienda', slug: 'vivienda', icon: 'House', color: '#4F6F62' },
+  { name: 'Comunidad', slug: 'comunidad', icon: 'Building2', color: '#68766F' },
+  { name: 'Agua', slug: 'agua', icon: 'Droplets', color: '#397A91' },
+  { name: 'Luz', slug: 'luz', icon: 'Zap', color: '#A56A25' },
+  { name: 'Gas', slug: 'gas', icon: 'Flame', color: '#A14F3C' },
+  {
+    name: 'Supermercado',
+    slug: 'supermercado',
+    icon: 'ShoppingBasket',
+    color: '#347055',
+  },
+  { name: 'Vehículos', slug: 'vehiculos', icon: 'Car', color: '#536B84' },
+  { name: 'Seguros', slug: 'seguros', icon: 'ShieldCheck', color: '#5E6285' },
+  {
+    name: 'Suscripciones',
+    slug: 'suscripciones',
+    icon: 'RefreshCw',
+    color: '#725C8D',
+  },
+  { name: 'Tecnología', slug: 'tecnologia', icon: 'Laptop', color: '#3C687B' },
+  { name: 'Salud', slug: 'salud', icon: 'HeartPulse', color: '#9B4E5B' },
+  {
+    name: 'Educación',
+    slug: 'educacion',
+    icon: 'GraduationCap',
+    color: '#6B5D3D',
+  },
+  { name: 'Ocio', slug: 'ocio', icon: 'PartyPopper', color: '#875979' },
+  { name: 'Mascotas', slug: 'mascotas', icon: 'PawPrint', color: '#806246' },
+  { name: 'Impuestos', slug: 'impuestos', icon: 'Landmark', color: '#6D5B57' },
+  { name: 'Servicios', slug: 'servicios', icon: 'Wrench', color: '#536C68' },
+  { name: 'Otros', slug: 'otros', icon: 'Shapes', color: '#66706B' },
+]);
+
