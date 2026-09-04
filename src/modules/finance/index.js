@@ -25,18 +25,23 @@ import { runSerializableTransaction } from '../household-domain/transaction.js';
 import {
   calculationQuerySchema,
   calendarQuerySchema,
+  createAccountSchema,
   createInvoiceSchema,
+  createOneTimeExpenseSchema,
   createRecurringExpenseSchema,
   editPaymentSchema,
   financeParamsSchema,
   invoiceQuerySchema,
   listRecurringQuerySchema,
+  oneTimeExpenseQuerySchema,
   planningQuerySchema,
   prepareMonthSchema,
   recoveryPreviewSchema,
   registerPaymentSchema,
   updateBalanceSchema,
+  updateAccountSchema,
   updateInvoiceSchema,
+  updateOneTimeExpenseSchema,
   updateRecurringExpenseSchema,
   updateRecoverySchema,
   upsertVariableMonthSchema,
@@ -47,8 +52,11 @@ import {
   calculateHouseholdBudget,
   calculateHouseholdSimulation,
   dateOrToday,
+  availableCommonBalance,
   jsonValue,
+  sanitizePlanningForViewer,
   upcomingPayments,
+  visibleExpenseWhere,
 } from './finance.service.js';
 import {
   registerInvoiceDocumentRoutes,
@@ -63,9 +71,9 @@ const memberAccess = (database, request) => {
   });
 };
 
-const getRecurringExpense = async (database, householdId, expenseId) => {
+const getRecurringExpense = async (database, householdId, expenseId, actorUserId) => {
   const expense = await database.recurringExpense.findFirst({
-    where: { id: expenseId, householdId },
+    where: { id: expenseId, householdId, ...visibleExpenseWhere(actorUserId) },
     include: { category: true, personalPerson: true, payments: { orderBy: { dueDate: 'desc' } } },
   });
   if (!expense) {
@@ -78,10 +86,10 @@ const getRecurringExpense = async (database, householdId, expenseId) => {
   return expense;
 };
 
-const getInvoice = async (database, householdId, invoiceId) => {
+const getInvoice = async (database, householdId, invoiceId, actorUserId) => {
   const invoice = await database.utilityInvoice.findFirst({
-    where: { id: invoiceId, householdId },
-    include: { category: true },
+    where: { id: invoiceId, householdId, ...visibleExpenseWhere(actorUserId) },
+    include: { category: true, personalPerson: true },
   });
   if (!invoice) {
     throw createDomainError(
@@ -93,9 +101,9 @@ const getInvoice = async (database, householdId, invoiceId) => {
   return invoice;
 };
 
-const getVariableMonth = async (database, householdId, variableMonthId) => {
+const getVariableMonth = async (database, householdId, variableMonthId, actorUserId) => {
   const item = await database.variableExpenseMonth.findFirst({
-    where: { id: variableMonthId, householdId },
+    where: { id: variableMonthId, householdId, ...visibleExpenseWhere(actorUserId) },
     include: {
       category: true,
       personalPerson: true,
@@ -138,6 +146,13 @@ function ownerKey(scope, personalPersonId) {
   return scope === 'PERSONAL' ? personalPersonId : 'HOUSEHOLD';
 }
 
+function canViewExpense(expense, actorUserId, requestedScope) {
+  const scope = expense.scope ?? 'HOUSEHOLD';
+  if (requestedScope && scope !== requestedScope) return false;
+  if (scope === 'HOUSEHOLD') return true;
+  return expense.personalPerson?.linkedUserId === actorUserId;
+}
+
 const monthBasedFrequency = (frequency) =>
   !['WEEKLY', 'ONE_TIME'].includes(frequency);
 
@@ -166,6 +181,8 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
       '/households/:householdId/plannings',
       '/households/:householdId/simulation',
       '/households/:householdId/recovery-plans',
+      '/households/:householdId/one-time-expenses',
+      '/households/:householdId/accounts',
     ],
     authenticate,
   );
@@ -180,7 +197,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
         where: {
           householdId,
           ...(query.includeArchived ? {} : { archivedAt: null }),
-          ...(query.scope ? { scope: query.scope } : {}),
+          ...visibleExpenseWhere(request.auth.userId, query.scope),
         },
         include: {
           category: true,
@@ -246,7 +263,10 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
     asyncRoute(async (request, response) => {
       const { householdId, expenseId } = financeParamsSchema.parse(request.params);
       await memberAccess(prisma, request);
-      return sendSuccess(response, await getRecurringExpense(prisma, householdId, expenseId));
+      return sendSuccess(
+        response,
+        await getRecurringExpense(prisma, householdId, expenseId, request.auth.userId),
+      );
     }),
   );
 
@@ -257,7 +277,12 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
       const { householdId, expenseId } = financeParamsSchema.parse(request.params);
       const body = updateRecurringExpenseSchema.parse(request.body);
       await memberAccess(prisma, request);
-      const existing = await getRecurringExpense(prisma, householdId, expenseId);
+      const existing = await getRecurringExpense(
+        prisma,
+        householdId,
+        expenseId,
+        request.auth.userId,
+      );
       const scope = body.scope ?? existing.scope;
       const personalPersonId = Object.hasOwn(body, 'personalPersonId')
         ? body.personalPersonId
@@ -312,7 +337,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
     asyncRoute(async (request, response) => {
       const { householdId, expenseId } = financeParamsSchema.parse(request.params);
       await memberAccess(prisma, request);
-      await getRecurringExpense(prisma, householdId, expenseId);
+      await getRecurringExpense(prisma, householdId, expenseId, request.auth.userId);
       const archived = await prisma.$transaction(async (database) => {
         const item = await database.recurringExpense.update({
           where: { id: expenseId },
@@ -340,7 +365,12 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
       await memberAccess(prisma, request);
       const result = await runSerializableTransaction(prisma, async (database) => {
         const expense = await database.recurringExpense.findFirst({
-          where: { id: expenseId, householdId, archivedAt: null },
+          where: {
+            id: expenseId,
+            householdId,
+            archivedAt: null,
+            ...visibleExpenseWhere(request.auth.userId),
+          },
         });
         if (!expense) {
           throw createDomainError(
@@ -438,7 +468,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
     asyncRoute(async (request, response) => {
       const { householdId, expenseId } = financeParamsSchema.parse(request.params);
       await memberAccess(prisma, request);
-      await getRecurringExpense(prisma, householdId, expenseId);
+      await getRecurringExpense(prisma, householdId, expenseId, request.auth.userId);
       const payments = await prisma.expensePayment.findMany({
         where: { recurringExpenseId: expenseId },
         orderBy: [{ dueDate: 'desc' }, { createdAt: 'desc' }],
@@ -454,7 +484,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
       const { householdId, expenseId, paymentId } = financeParamsSchema.parse(request.params);
       const body = editPaymentSchema.parse(request.body);
       await memberAccess(prisma, request);
-      await getRecurringExpense(prisma, householdId, expenseId);
+      await getRecurringExpense(prisma, householdId, expenseId, request.auth.userId);
 
       const payment = await prisma.$transaction(async (database) => {
         const existing = await database.expensePayment.findFirst({
@@ -503,9 +533,15 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
       const query = invoiceQuerySchema.parse(request.query);
       await memberAccess(prisma, request);
       const invoices = await prisma.utilityInvoice.findMany({
-        where: { householdId, ...(query.categoryId ? { categoryId: query.categoryId } : {}) },
+        where: {
+          householdId,
+          ...visibleExpenseWhere(request.auth.userId),
+          ...(query.categoryId ? { categoryId: query.categoryId } : {}),
+          ...visibleExpenseWhere(request.auth.userId, query.scope),
+        },
         include: {
           category: true,
+          personalPerson: { select: { id: true, name: true } },
           _count: { select: { documents: true } },
         },
         orderBy: [{ periodEnd: 'desc' }, { invoiceDate: 'desc' }],
@@ -528,10 +564,17 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
       const body = createInvoiceSchema.parse(request.body);
       await memberAccess(prisma, request);
       await requireHouseholdCategory(prisma, { householdId, categoryId: body.categoryId });
+      await validateScope(prisma, householdId, body.scope, body.personalPersonId);
       const invoice = await prisma.$transaction(async (database) => {
         const item = await database.utilityInvoice.create({
-          data: { householdId, ...body, chargeDate: body.chargeDate ?? null, notes: body.notes ?? null },
-          include: { category: true },
+          data: {
+            householdId,
+            ...body,
+            personalPersonId: body.personalPersonId ?? null,
+            chargeDate: body.chargeDate ?? null,
+            notes: body.notes ?? null,
+          },
+          include: { category: true, personalPerson: true },
         });
         await createAuditLog(database, {
           actorUserId: request.auth.userId,
@@ -554,19 +597,30 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
       await memberAccess(prisma, request);
       const household = await prisma.household.findUnique({ where: { id: householdId } });
       const invoices = await prisma.utilityInvoice.findMany({
-        where: { householdId, ...(query.categoryId ? { categoryId: query.categoryId } : {}) },
-        include: { category: true },
+        where: {
+          householdId,
+          ...(query.categoryId ? { categoryId: query.categoryId } : {}),
+          ...visibleExpenseWhere(request.auth.userId, query.scope),
+        },
+        include: {
+          category: true,
+          personalPerson: { select: { id: true, name: true } },
+        },
         orderBy: { periodEnd: 'asc' },
       });
       const groups = new Map();
       invoices.forEach((invoice) => {
-        const current = groups.get(invoice.categoryId) ?? [];
+        const key = `${invoice.categoryId}:${invoice.scope === 'PERSONAL' ? invoice.personalPersonId : 'HOUSEHOLD'}`;
+        const current = groups.get(key) ?? [];
         current.push(invoice);
-        groups.set(invoice.categoryId, current);
+        groups.set(key, current);
       });
-      const statistics = [...groups.entries()].map(([categoryId, items]) => ({
-        categoryId,
+      const statistics = [...groups.values()].map((items) => ({
+        categoryId: items[0].categoryId,
         category: items[0].category,
+        scope: items[0].scope,
+        personalPersonId: items[0].personalPersonId,
+        personalPerson: items[0].personalPerson,
         ...calculateInvoiceStatistics(items, {
           householdMarginBps: household.safetyMarginBps,
           categoryMarginBps: items[0].category.safetyMarginBps,
@@ -583,10 +637,15 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
       const { householdId, invoiceId } = financeParamsSchema.parse(request.params);
       const body = updateInvoiceSchema.parse(request.body);
       await memberAccess(prisma, request);
-      const existing = await getInvoice(prisma, householdId, invoiceId);
+      const existing = await getInvoice(prisma, householdId, invoiceId, request.auth.userId);
       if (body.categoryId) {
         await requireHouseholdCategory(prisma, { householdId, categoryId: body.categoryId });
       }
+      const scope = body.scope ?? existing.scope;
+      const personalPersonId = Object.hasOwn(body, 'personalPersonId')
+        ? body.personalPersonId
+        : existing.personalPersonId;
+      await validateScope(prisma, householdId, scope, personalPersonId);
       const start = toIsoDate(body.periodStart ?? existing.periodStart);
       const end = toIsoDate(body.periodEnd ?? existing.periodEnd);
       if (end < start) {
@@ -597,10 +656,20 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
         );
       }
       const invoice = await prisma.$transaction(async (database) => {
+        const invoiceData = {
+          ...body,
+          ...normalizeNullableFields(body, ['chargeDate', 'notes']),
+        };
+        if (existing.scope !== undefined || Object.hasOwn(body, 'scope')) {
+          invoiceData.scope = scope;
+          invoiceData.personalPersonId = personalPersonId ?? null;
+        }
         const item = await database.utilityInvoice.update({
           where: { id: invoiceId },
-          data: { ...body, ...normalizeNullableFields(body, ['chargeDate', 'notes']) },
-          include: { category: true },
+          data: invoiceData,
+          include: existing.scope !== undefined || Object.hasOwn(body, 'scope')
+            ? { category: true, personalPerson: true }
+            : { category: true },
         });
         await createAuditLog(database, {
           actorUserId: request.auth.userId,
@@ -621,7 +690,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
     asyncRoute(async (request, response) => {
       const { householdId, invoiceId } = financeParamsSchema.parse(request.params);
       await memberAccess(prisma, request);
-      await getInvoice(prisma, householdId, invoiceId);
+      await getInvoice(prisma, householdId, invoiceId, request.auth.userId);
       await prisma.utilityInvoice.delete({ where: { id: invoiceId } });
       return sendSuccess(response, { id: invoiceId, deleted: true });
     }),
@@ -644,6 +713,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
       const months = await prisma.variableExpenseMonth.findMany({
         where: {
           householdId,
+          ...visibleExpenseWhere(request.auth.userId),
           ...(query.year ? { year: query.year } : {}),
           ...(query.month ? { month: query.month } : {}),
           ...(query.categoryId ? { categoryId: query.categoryId } : {}),
@@ -753,6 +823,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
       const months = await prisma.variableExpenseMonth.findMany({
         where: {
           householdId,
+          ...visibleExpenseWhere(request.auth.userId),
           ...(query.categoryId ? { categoryId: query.categoryId } : {}),
           ...(query.ownerKey ? { ownerKey: query.ownerKey } : {}),
         },
@@ -787,7 +858,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
     asyncRoute(async (request, response) => {
       const { householdId, variableMonthId } = financeParamsSchema.parse(request.params);
       await memberAccess(prisma, request);
-      await getVariableMonth(prisma, householdId, variableMonthId);
+      await getVariableMonth(prisma, householdId, variableMonthId, request.auth.userId);
       await prisma.$transaction(async (database) => {
         await database.variableExpenseEntry.deleteMany({
           where: { variableExpenseMonthId: variableMonthId },
@@ -799,11 +870,236 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
   );
 
   router.get(
+    '/households/:householdId/one-time-expenses',
+    asyncRoute(async (request, response) => {
+      const { householdId } = financeParamsSchema.parse(request.params);
+      const query = oneTimeExpenseQuerySchema.parse(request.query);
+      await memberAccess(prisma, request);
+      const expenses = await prisma.oneTimeExpense.findMany({
+        where: {
+          householdId,
+          ...(query.categoryId ? { categoryId: query.categoryId } : {}),
+          ...visibleExpenseWhere(request.auth.userId, query.scope),
+        },
+        include: {
+          category: true,
+          personalPerson: { select: { id: true, name: true } },
+        },
+        orderBy: [{ expenseDate: 'desc' }, { createdAt: 'desc' }],
+      });
+      return sendSuccess(response, expenses);
+    }),
+  );
+
+  router.post(
+    '/households/:householdId/one-time-expenses',
+    requireCsrf,
+    asyncRoute(async (request, response) => {
+      const { householdId } = financeParamsSchema.parse(request.params);
+      const body = createOneTimeExpenseSchema.parse(request.body);
+      await memberAccess(prisma, request);
+      await requireHouseholdCategory(prisma, { householdId, categoryId: body.categoryId });
+      await validateScope(prisma, householdId, body.scope, body.personalPersonId);
+      const expense = await prisma.$transaction(async (database) => {
+        const item = await database.oneTimeExpense.create({
+          data: {
+            householdId,
+            ...body,
+            personalPersonId: body.personalPersonId ?? null,
+            notes: body.notes ?? null,
+          },
+          include: { category: true, personalPerson: true },
+        });
+        await createAuditLog(database, {
+          actorUserId: request.auth.userId,
+          householdId,
+          action: 'EXPENSE_CREATED',
+          resourceType: 'OneTimeExpense',
+          resourceId: item.id,
+        });
+        return item;
+      });
+      return sendSuccess(response, expense, { statusCode: 201 });
+    }),
+  );
+
+  router.patch(
+    '/households/:householdId/one-time-expenses/:expenseId',
+    requireCsrf,
+    asyncRoute(async (request, response) => {
+      const { householdId, expenseId } = financeParamsSchema.parse(request.params);
+      const body = updateOneTimeExpenseSchema.parse(request.body);
+      await memberAccess(prisma, request);
+      const existing = await prisma.oneTimeExpense.findFirst({
+        where: { id: expenseId, householdId, ...visibleExpenseWhere(request.auth.userId) },
+      });
+      if (!existing) {
+        throw createDomainError(404, 'ONE_TIME_EXPENSE_NOT_FOUND', 'No se encontró el gasto puntual.');
+      }
+      const categoryId = body.categoryId ?? existing.categoryId;
+      const scope = body.scope ?? existing.scope;
+      const personalPersonId = Object.hasOwn(body, 'personalPersonId')
+        ? body.personalPersonId
+        : existing.personalPersonId;
+      await requireHouseholdCategory(prisma, { householdId, categoryId });
+      await validateScope(prisma, householdId, scope, personalPersonId);
+      const expense = await prisma.$transaction(async (database) => {
+        const item = await database.oneTimeExpense.update({
+          where: { id: expenseId },
+          data: {
+            ...body,
+            categoryId,
+            scope,
+            personalPersonId: personalPersonId ?? null,
+            ...normalizeNullableFields(body, ['notes']),
+          },
+          include: { category: true, personalPerson: true },
+        });
+        await createAuditLog(database, {
+          actorUserId: request.auth.userId,
+          householdId,
+          action: 'EXPENSE_CHANGED',
+          resourceType: 'OneTimeExpense',
+          resourceId: expenseId,
+        });
+        return item;
+      });
+      return sendSuccess(response, expense);
+    }),
+  );
+
+  router.delete(
+    '/households/:householdId/one-time-expenses/:expenseId',
+    requireCsrf,
+    asyncRoute(async (request, response) => {
+      const { householdId, expenseId } = financeParamsSchema.parse(request.params);
+      await memberAccess(prisma, request);
+      const existing = await prisma.oneTimeExpense.findFirst({
+        where: { id: expenseId, householdId, ...visibleExpenseWhere(request.auth.userId) },
+      });
+      if (!existing) {
+        throw createDomainError(404, 'ONE_TIME_EXPENSE_NOT_FOUND', 'No se encontró el gasto puntual.');
+      }
+      await prisma.oneTimeExpense.delete({ where: { id: expenseId } });
+      await createAuditLog(prisma, {
+        actorUserId: request.auth.userId,
+        householdId,
+        action: 'EXPENSE_DELETED',
+        resourceType: 'OneTimeExpense',
+        resourceId: expenseId,
+      });
+      return sendSuccess(response, { id: expenseId, deleted: true });
+    }),
+  );
+
+  router.get(
+    '/households/:householdId/accounts',
+    asyncRoute(async (request, response) => {
+      const { householdId } = financeParamsSchema.parse(request.params);
+      await memberAccess(prisma, request);
+      const accounts = await prisma.householdAccount.findMany({
+        where: {
+          householdId,
+          isActive: true,
+          OR: [
+            { scope: 'HOUSEHOLD' },
+            { scope: 'PERSONAL', personalPerson: { linkedUserId: request.auth.userId } },
+          ],
+        },
+        include: { personalPerson: { select: { id: true, name: true } } },
+        orderBy: [{ scope: 'asc' }, { name: 'asc' }],
+      });
+      return sendSuccess(response, accounts);
+    }),
+  );
+
+  router.post(
+    '/households/:householdId/accounts',
+    requireCsrf,
+    asyncRoute(async (request, response) => {
+      const { householdId } = financeParamsSchema.parse(request.params);
+      const body = createAccountSchema.parse(request.body);
+      await memberAccess(prisma, request);
+      await validateScope(prisma, householdId, body.scope, body.personalPersonId);
+      const account = await prisma.householdAccount.create({
+        data: {
+          householdId,
+          ...body,
+          personalPersonId: body.personalPersonId ?? null,
+        },
+        include: { personalPerson: { select: { id: true, name: true } } },
+      });
+      return sendSuccess(response, account, { statusCode: 201 });
+    }),
+  );
+
+  router.patch(
+    '/households/:householdId/accounts/:accountId',
+    requireCsrf,
+    asyncRoute(async (request, response) => {
+      const { householdId, accountId } = financeParamsSchema.parse(request.params);
+      const body = updateAccountSchema.parse(request.body);
+      await memberAccess(prisma, request);
+      const existing = await prisma.householdAccount.findFirst({
+        where: {
+          id: accountId,
+          householdId,
+          isActive: true,
+          OR: [
+            { scope: 'HOUSEHOLD' },
+            { scope: 'PERSONAL', personalPerson: { linkedUserId: request.auth.userId } },
+          ],
+        },
+      });
+      if (!existing) throw createDomainError(404, 'ACCOUNT_NOT_FOUND', 'No se encontró la cuenta.');
+      const scope = body.scope ?? existing.scope;
+      const personalPersonId = Object.hasOwn(body, 'personalPersonId')
+        ? body.personalPersonId
+        : existing.personalPersonId;
+      await validateScope(prisma, householdId, scope, personalPersonId);
+      const account = await prisma.householdAccount.update({
+        where: { id: accountId },
+        data: { ...body, scope, personalPersonId: personalPersonId ?? null },
+        include: { personalPerson: { select: { id: true, name: true } } },
+      });
+      return sendSuccess(response, account);
+    }),
+  );
+
+  router.delete(
+    '/households/:householdId/accounts/:accountId',
+    requireCsrf,
+    asyncRoute(async (request, response) => {
+      const { householdId, accountId } = financeParamsSchema.parse(request.params);
+      await memberAccess(prisma, request);
+      const existing = await prisma.householdAccount.findFirst({
+        where: {
+          id: accountId,
+          householdId,
+          isActive: true,
+          OR: [
+            { scope: 'HOUSEHOLD' },
+            { scope: 'PERSONAL', personalPerson: { linkedUserId: request.auth.userId } },
+          ],
+        },
+      });
+      if (!existing) throw createDomainError(404, 'ACCOUNT_NOT_FOUND', 'No se encontró la cuenta.');
+      await prisma.householdAccount.update({ where: { id: accountId }, data: { isActive: false } });
+      return sendSuccess(response, { id: accountId, deleted: true });
+    }),
+  );
+
+  router.get(
     '/households/:householdId/budget',
     asyncRoute(async (request, response) => {
       const { householdId } = financeParamsSchema.parse(request.params);
       await memberAccess(prisma, request);
-      const { budget } = await calculateHouseholdBudget(prisma, householdId);
+      const { budget } = await calculateHouseholdBudget(
+        prisma,
+        householdId,
+        undefined,
+        request.auth.userId,
+      );
       return sendSuccess(response, budget);
     }),
   );
@@ -816,7 +1112,13 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
       await memberAccess(prisma, request);
       return sendSuccess(
         response,
-        await calculateDashboard(prisma, householdId, query.date, query.balanceCents),
+        await calculateDashboard(
+          prisma,
+          householdId,
+          query.date,
+          query.balanceCents,
+          request.auth.userId,
+        ),
       );
     }),
   );
@@ -861,6 +1163,10 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
       const { householdId } = financeParamsSchema.parse(request.params);
       const query = planningQuerySchema.parse(request.query);
       await memberAccess(prisma, request);
+      const viewerPerson = await prisma.householdPerson.findFirst({
+        where: { householdId, linkedUserId: request.auth.userId },
+        select: { id: true, linkedUserId: true },
+      });
       const plannings = await prisma.monthlyPlanning.findMany({
         where: {
           householdId,
@@ -870,7 +1176,12 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
         include: { contributions: { orderBy: { personName: 'asc' } }, recoveryPlans: true },
         orderBy: [{ year: 'desc' }, { month: 'desc' }],
       });
-      return sendSuccess(response, plannings);
+      return sendSuccess(
+        response,
+        plannings.map((planning) =>
+          sanitizePlanningForViewer(planning, request.auth.userId, viewerPerson ? [viewerPerson] : []),
+        ),
+      );
     }),
   );
 
@@ -886,6 +1197,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
         householdId,
         body.calculationDate,
         body.confirmedBalanceCents,
+        undefined,
       );
       if (!dashboard.budget.readiness.ready) {
         throw createDomainError(
@@ -893,6 +1205,23 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
           'BUDGET_NOT_READY',
           'Completa las personas y su reparto antes de preparar el mes.',
           dashboard.budget.readiness,
+        );
+      }
+      const activePersonIds = new Set(
+        dashboard.budget.contributions.map((contribution) => contribution.personId),
+      );
+      const confirmedPersonalBalances = new Map(
+        body.confirmedPersonalBalances.map((item) => [item.personId, item.balanceCents]),
+      );
+      if (
+        confirmedPersonalBalances.size !== body.confirmedPersonalBalances.length ||
+        confirmedPersonalBalances.size !== activePersonIds.size ||
+        [...confirmedPersonalBalances.keys()].some((personId) => !activePersonIds.has(personId))
+      ) {
+        throw createDomainError(
+          400,
+          'PERSONAL_BALANCES_REQUIRED',
+          'Confirma el saldo personal de cada persona activa.',
         );
       }
       const date = body.calculationDate;
@@ -954,6 +1283,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
               householdPersonId: contribution.personId,
               personName: contribution.personName,
               contributionBps: contribution.contributionBps,
+              confirmedPersonalBalanceCents: confirmedPersonalBalances.get(contribution.personId),
               standardHouseholdCents: contribution.standardHouseholdCents,
               personalExpenseCents: contribution.personalExpenseCents,
               temporaryAdjustmentCents,
@@ -988,7 +1318,15 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
           include: { contributions: { orderBy: { personName: 'asc' } } },
         });
       });
-      return sendSuccess(response, result, { statusCode: 201 });
+      const viewerPerson = await prisma.householdPerson.findFirst({
+        where: { householdId, linkedUserId: request.auth.userId },
+        select: { id: true, linkedUserId: true },
+      });
+      return sendSuccess(
+        response,
+        sanitizePlanningForViewer(result, request.auth.userId, viewerPerson ? [viewerPerson] : []),
+        { statusCode: 201 },
+      );
     }),
   );
 
@@ -1007,7 +1345,14 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
         data: { fundingStatus: 'FUNDED', fundedAt: new Date() },
         include: { contributions: true },
       });
-      return sendSuccess(response, planning);
+      const viewerPerson = await prisma.householdPerson.findFirst({
+        where: { householdId, linkedUserId: request.auth.userId },
+        select: { id: true, linkedUserId: true },
+      });
+      return sendSuccess(
+        response,
+        sanitizePlanningForViewer(planning, request.auth.userId, viewerPerson ? [viewerPerson] : []),
+      );
     }),
   );
 
@@ -1019,7 +1364,13 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
       await memberAccess(prisma, request);
       return sendSuccess(
         response,
-        await calculateHouseholdSimulation(prisma, householdId, query.date, query.balanceCents),
+        await calculateHouseholdSimulation(
+          prisma,
+          householdId,
+          query.date,
+          query.balanceCents,
+          request.auth.userId,
+        ),
       );
     }),
   );
@@ -1031,7 +1382,12 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
       const { householdId } = financeParamsSchema.parse(request.params);
       const body = recoveryPreviewSchema.parse(request.body);
       await memberAccess(prisma, request);
-      const { inputs, budget } = await calculateHouseholdBudget(prisma, householdId);
+      const { inputs, budget } = await calculateHouseholdBudget(
+        prisma,
+        householdId,
+        undefined,
+        request.auth.userId,
+      );
       if (!budget.readiness.ready) {
         throw createDomainError(
           409,
@@ -1045,7 +1401,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
         ...body,
         startsOn,
         upcomingPayments: upcomingPayments(inputs.recurringExpenses, startsOn),
-        relevantAvailableBalanceCents: inputs.household.currentBalanceCents,
+        relevantAvailableBalanceCents: availableCommonBalance(inputs),
         standardMonthlyBudgetCents: budget.householdBudgetCents,
       });
       return sendSuccess(response, {
@@ -1067,7 +1423,12 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
       const { householdId } = financeParamsSchema.parse(request.params);
       const body = recoveryPreviewSchema.parse(request.body);
       await memberAccess(prisma, request);
-      const { inputs, budget } = await calculateHouseholdBudget(prisma, householdId);
+      const { inputs, budget } = await calculateHouseholdBudget(
+        prisma,
+        householdId,
+        undefined,
+        request.auth.userId,
+      );
       if (!budget.readiness.ready) {
         throw createDomainError(
           409,
@@ -1081,7 +1442,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
         ...body,
         startsOn,
         upcomingPayments: upcomingPayments(inputs.recurringExpenses, startsOn),
-        relevantAvailableBalanceCents: inputs.household.currentBalanceCents,
+        relevantAvailableBalanceCents: availableCommonBalance(inputs),
         standardMonthlyBudgetCents: budget.householdBudgetCents,
       });
       if (body.monthlyPlanningId) {
@@ -1169,12 +1530,44 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
       await memberAccess(prisma, request);
       const today = dateOrToday();
       const anchorDate = query.anchorDate ?? today;
-      const expenses = await prisma.recurringExpense.findMany({
+      const allExpenses = await prisma.recurringExpense.findMany({
         where: { householdId },
         include: { category: true, personalPerson: { select: { id: true, name: true } } },
       });
+      const personalPersonIds = allExpenses
+        .filter((expense) => expense.scope === 'PERSONAL' && expense.personalPersonId)
+        .map((expense) => expense.personalPersonId);
+      const linkedPeople = personalPersonIds.length && prisma.householdPerson?.findMany
+        ? await prisma.householdPerson.findMany({
+            where: { householdId, id: { in: personalPersonIds } },
+            select: { id: true, linkedUserId: true },
+          })
+        : [];
+      const linkedUserByPersonId = new Map(
+        linkedPeople.map((person) => [person.id, person.linkedUserId]),
+      );
+      const expenses = allExpenses.filter((expense) =>
+        canViewExpense(
+          {
+            ...expense,
+            personalPerson: expense.personalPerson
+              ? {
+                  ...expense.personalPerson,
+                  linkedUserId: linkedUserByPersonId.get(expense.personalPerson.id),
+                }
+              : null,
+          },
+          request.auth.userId,
+          query.scope,
+        ),
+      );
       const payments = await prisma.expensePayment.findMany({
-        where: { recurringExpense: { householdId } },
+        where: {
+          recurringExpense: {
+            householdId,
+            ...visibleExpenseWhere(request.auth.userId),
+          },
+        },
       });
       return sendSuccess(
         response,

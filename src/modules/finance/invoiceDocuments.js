@@ -392,7 +392,12 @@ export const registerInvoiceDocumentRoutes = ({
   const authorizeInvoice = asyncRoute(async (request, _response, next) => {
     const { householdId, invoiceId } = financeParamsSchema.parse(request.params);
     await memberAccess(prisma, request);
-    request.financeInvoice = await getInvoice(prisma, householdId, invoiceId);
+    request.financeInvoice = await getInvoice(
+      prisma,
+      householdId,
+      invoiceId,
+      request.auth.userId,
+    );
     next();
   });
 

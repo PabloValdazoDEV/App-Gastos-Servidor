@@ -57,7 +57,7 @@ const parseRequest = (request, schemas = {}) => ({
   ...(schemas.body ? { body: schemas.body.parse(request.body) } : {}),
 });
 
-const buildServices = ({ prisma, config, services }) => ({
+const buildServices = ({ prisma, config, services, emailService, logger }) => ({
   households:
     services?.households ??
     createHouseholdsService({ prisma, defaults: config?.defaults }),
@@ -68,6 +68,8 @@ const buildServices = ({ prisma, config, services }) => ({
     createInvitationsService({
       prisma,
       invitationTtlDays: config?.tokens?.invitationTtlDays ?? 7,
+      emailService,
+      logger,
     }),
   categories: services?.categories ?? createCategoriesService({ prisma }),
 });
@@ -78,6 +80,8 @@ export const createHouseholdDomainRouter = ({
   authenticate,
   requireCsrf,
   services,
+  emailService,
+  logger,
 }) => {
   if (!prisma && !services) {
     throw new TypeError('createHouseholdDomainRouter requires prisma or services.');
@@ -90,7 +94,7 @@ export const createHouseholdDomainRouter = ({
   }
 
   const router = Router();
-  const domain = buildServices({ prisma, config, services });
+  const domain = buildServices({ prisma, config, services, emailService, logger });
   const requireAuthentication = authenticate ?? requireAuthenticationContext;
 
   router.post(

@@ -229,7 +229,11 @@ export function calculateMonthlyStandardBudget({
   recurringExpenses = [],
   invoiceGroups = [],
   variableGroups = [],
+  oneTimeExpenses = [],
 }) {
+  const calculationDateValue = toCivilDate(calculationDate);
+  const calculationYear = calculationDateValue.getUTCFullYear();
+  const calculationMonth = calculationDateValue.getUTCMonth() + 1;
   const recurringLines = recurringExpenses
     .filter((expense) => expense.isActive !== false && !expense.archivedAt)
     .map((expense) => {
@@ -243,7 +247,7 @@ export function calculateMonthlyStandardBudget({
         id: expense.id,
         name: expense.name,
         category: expense.category,
-        type: 'RECURRING',
+      type: 'RECURRING',
         scope: expense.scope,
         personalPersonId: expense.personalPersonId,
         baseCents,
@@ -263,8 +267,8 @@ export function calculateMonthlyStandardBudget({
       name: group.category?.name ?? 'Factura sin categoría',
       category: group.category,
       type: 'INVOICE',
-      scope: 'HOUSEHOLD',
-      personalPersonId: null,
+      scope: group.scope ?? 'HOUSEHOLD',
+      personalPersonId: group.personalPersonId ?? null,
       baseCents: statistics.historicalAverageCents,
       effectiveMarginBps: statistics.effectiveMarginBps,
       amountCents: statistics.recommendedCents,
@@ -293,9 +297,46 @@ export function calculateMonthlyStandardBudget({
     }];
   });
 
-  const lines = [...recurringLines, ...invoiceLines, ...variableLines];
+  const oneTimeLines = oneTimeExpenses
+    .filter((expense) => {
+      if (expense.isActive === false || expense.archivedAt) return false;
+      const expenseDate = toCivilDate(expense.expenseDate);
+      return (
+        expenseDate.getUTCFullYear() === calculationYear &&
+        expenseDate.getUTCMonth() + 1 === calculationMonth
+      );
+    })
+    .map((expense) => {
+      const effectiveMarginBps = resolveMarginBps({
+        expenseMarginBps: expense.safetyMarginOverrideBps,
+        categoryMarginBps: categoryMargin(expense),
+        householdMarginBps,
+      });
+      return {
+        id: expense.id,
+        name: expense.name,
+        category: expense.category,
+        type: 'ONE_TIME',
+        scope: expense.scope ?? 'HOUSEHOLD',
+        personalPersonId: expense.personalPersonId ?? null,
+        baseCents: expense.amountCents,
+        effectiveMarginBps,
+        amountCents: applyMarginCents(expense.amountCents, effectiveMarginBps),
+        expenseDate: expense.expenseDate,
+      };
+    });
+
+  const lines = [...recurringLines, ...invoiceLines, ...variableLines, ...oneTimeLines];
   const householdLines = lines.filter((line) => line.scope === 'HOUSEHOLD');
   const personalLines = lines.filter((line) => line.scope === 'PERSONAL');
+  const householdBaseBudgetCents = householdLines.reduce(
+    (sum, line) => sum + line.baseCents,
+    0,
+  );
+  const personalBaseBudgetCents = personalLines.reduce(
+    (sum, line) => sum + line.baseCents,
+    0,
+  );
   const householdBudgetCents = householdLines.reduce(
     (sum, line) => sum + line.amountCents,
     0,
@@ -320,7 +361,13 @@ export function calculateMonthlyStandardBudget({
   return {
     calculationVersion: 'v1',
     householdBudgetCents,
+    householdBaseBudgetCents,
+    householdMarginCents: householdBudgetCents - householdBaseBudgetCents,
     personalBudgetCents: [...personalTotals.values()].reduce((sum, value) => sum + value, 0),
+    personalBaseBudgetCents,
+    personalMarginCents:
+      [...personalTotals.values()].reduce((sum, value) => sum + value, 0) -
+      personalBaseBudgetCents,
     recommendedBudgetCents:
       householdBudgetCents + [...personalTotals.values()].reduce((sum, value) => sum + value, 0),
     contributions,
@@ -329,6 +376,7 @@ export function calculateMonthlyStandardBudget({
       recurringCount: recurringLines.length,
       invoiceCategoryCount: invoiceLines.length,
       variableCategoryCount: variableLines.length,
+      oneTimeCount: oneTimeLines.length,
       latestVariableMonth: variableLines
         .map((line) => line.statistics.latestMonth)
         .filter(Boolean)

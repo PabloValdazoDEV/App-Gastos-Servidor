@@ -138,35 +138,35 @@ enum AuditAction {
 }
 
 model User {
-  id                     String                     @id @default(uuid()) @db.Uuid
-  email                  String                     @unique @db.VarChar(320)
-  passwordHash           String?                    @db.VarChar(255)
-  name                   String                     @db.VarChar(120)
-  emailVerifiedAt        DateTime?
-  isActive               Boolean                    @default(true)
-  timezone               String                     @default("Europe/Madrid") @db.VarChar(64)
-  locale                 String                     @default("es-ES") @db.VarChar(16)
-  createdAt              DateTime                   @default(now())
-  updatedAt              DateTime                   @updatedAt
-  oauthAccounts          OAuthAccount[]
-  refreshSessions        RefreshSession[]
-  passwordResetTokens    PasswordResetToken[]
+  id                       String                     @id @default(uuid()) @db.Uuid
+  email                    String                     @unique @db.VarChar(320)
+  passwordHash             String?                    @db.VarChar(255)
+  name                     String                     @db.VarChar(120)
+  emailVerifiedAt          DateTime?
+  isActive                 Boolean                    @default(true)
+  timezone                 String                     @default("Europe/Madrid") @db.VarChar(64)
+  locale                   String                     @default("es-ES") @db.VarChar(16)
+  createdAt                DateTime                   @default(now())
+  updatedAt                DateTime                   @updatedAt
+  oauthAccounts            OAuthAccount[]
+  refreshSessions          RefreshSession[]
+  passwordResetTokens      PasswordResetToken[]
   legalDocumentAcceptances LegalDocumentAcceptance[]
-  ownedHouseholds        Household[]                @relation("HouseholdOwner")
-  linkedHouseholdPeople  HouseholdPerson[]          @relation("LinkedHouseholdUser")
-  householdAccesses      HouseholdUserAccess[]
-  invitationsSent        Invitation[]               @relation("InvitationInviter")
-  invitationsAccepted    Invitation[]               @relation("InvitationAccepter")
-  balanceSnapshots       HouseholdBalanceSnapshot[] @relation("BalanceSnapshotRecorder")
-  preparedPlannings      MonthlyPlanning[]          @relation("PlanningPreparer")
-  recoveryPlansCreated   RecoveryPlan[]             @relation("RecoveryPlanCreator")
-  paymentsRecorded       ExpensePayment[]           @relation("PaymentRecorder")
-  invoiceDocumentsUploaded InvoiceDocument[]        @relation("InvoiceDocumentUploader")
-  notificationPreference NotificationPreference?
-  reminderRules          ReminderRule[]
-  notifications          Notification[]
-  pushSubscriptions      PushSubscription[]
-  auditLogs              AuditLog[]                 @relation("AuditActor")
+  ownedHouseholds          Household[]                @relation("HouseholdOwner")
+  linkedHouseholdPeople    HouseholdPerson[]          @relation("LinkedHouseholdUser")
+  householdAccesses        HouseholdUserAccess[]
+  invitationsSent          Invitation[]               @relation("InvitationInviter")
+  invitationsAccepted      Invitation[]               @relation("InvitationAccepter")
+  balanceSnapshots         HouseholdBalanceSnapshot[] @relation("BalanceSnapshotRecorder")
+  preparedPlannings        MonthlyPlanning[]          @relation("PlanningPreparer")
+  recoveryPlansCreated     RecoveryPlan[]             @relation("RecoveryPlanCreator")
+  paymentsRecorded         ExpensePayment[]           @relation("PaymentRecorder")
+  invoiceDocumentsUploaded InvoiceDocument[]          @relation("InvoiceDocumentUploader")
+  notificationPreference   NotificationPreference?
+  reminderRules            ReminderRule[]
+  notifications            Notification[]
+  pushSubscriptions        PushSubscription[]
+  auditLogs                AuditLog[]                 @relation("AuditActor")
 }
 
 model OAuthAccount {
@@ -255,6 +255,8 @@ model Household {
   recurringExpenses     RecurringExpense[]
   utilityInvoices       UtilityInvoice[]
   variableExpenseMonths VariableExpenseMonth[]
+  oneTimeExpenses       OneTimeExpense[]
+  accounts              HouseholdAccount[]
   balanceSnapshots      HouseholdBalanceSnapshot[]
   monthlyPlannings      MonthlyPlanning[]
   recoveryPlans         RecoveryPlan[]
@@ -280,7 +282,10 @@ model HouseholdPerson {
   linkedUser             User?                         @relation("LinkedHouseholdUser", fields: [linkedUserId], references: [id], onDelete: SetNull)
   invitations            Invitation[]
   personalExpenses       RecurringExpense[]            @relation("PersonalRecurringExpense")
+  personalInvoices       UtilityInvoice[]              @relation("PersonalInvoice")
   variableExpenseMonths  VariableExpenseMonth[]        @relation("PersonalVariableExpense")
+  oneTimeExpenses        OneTimeExpense[]              @relation("PersonalOneTimeExpense")
+  accounts               HouseholdAccount[]            @relation("PersonalHouseholdAccount")
   planningContributions  MonthlyPlanningContribution[]
 
   @@unique([householdId, linkedUserId])
@@ -344,6 +349,7 @@ model Category {
   recurringExpenses     RecurringExpense[]
   utilityInvoices       UtilityInvoice[]
   variableExpenseMonths VariableExpenseMonth[]
+  oneTimeExpenses       OneTimeExpense[]
 
   @@unique([householdId, slug])
   @@index([householdId, archivedAt])
@@ -405,23 +411,65 @@ model ExpensePayment {
 }
 
 model UtilityInvoice {
-  id          String            @id @default(uuid()) @db.Uuid
-  householdId String            @db.Uuid
-  categoryId  String            @db.Uuid
-  amountCents Int
-  periodStart DateTime          @db.Date
-  periodEnd   DateTime          @db.Date
-  invoiceDate DateTime          @db.Date
-  chargeDate  DateTime?         @db.Date
-  notes       String?           @db.VarChar(2000)
-  createdAt   DateTime          @default(now())
-  updatedAt   DateTime          @updatedAt
-  household   Household         @relation(fields: [householdId], references: [id], onDelete: Restrict)
-  category    Category          @relation(fields: [categoryId], references: [id], onDelete: Restrict)
-  documents   InvoiceDocument[]
+  id               String            @id @default(uuid()) @db.Uuid
+  householdId      String            @db.Uuid
+  categoryId       String            @db.Uuid
+  personalPersonId String?           @db.Uuid
+  amountCents      Int
+  scope            ExpenseScope      @default(HOUSEHOLD)
+  periodStart      DateTime          @db.Date
+  periodEnd        DateTime          @db.Date
+  invoiceDate      DateTime          @db.Date
+  chargeDate       DateTime?         @db.Date
+  notes            String?           @db.VarChar(2000)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  household        Household         @relation(fields: [householdId], references: [id], onDelete: Restrict)
+  category         Category          @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  personalPerson   HouseholdPerson?  @relation("PersonalInvoice", fields: [personalPersonId], references: [id], onDelete: Restrict)
+  documents        InvoiceDocument[]
 
   @@index([householdId, categoryId, periodEnd])
   @@index([householdId, chargeDate])
+  @@index([personalPersonId])
+}
+
+model OneTimeExpense {
+  id               String           @id @default(uuid()) @db.Uuid
+  householdId      String           @db.Uuid
+  categoryId       String           @db.Uuid
+  personalPersonId String?          @db.Uuid
+  name             String           @db.VarChar(120)
+  amountCents      Int
+  scope            ExpenseScope     @default(HOUSEHOLD)
+  expenseDate      DateTime         @db.Date
+  notes            String?          @db.VarChar(2000)
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  household        Household        @relation(fields: [householdId], references: [id], onDelete: Restrict)
+  category         Category         @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  personalPerson   HouseholdPerson? @relation("PersonalOneTimeExpense", fields: [personalPersonId], references: [id], onDelete: Restrict)
+
+  @@index([householdId, expenseDate])
+  @@index([categoryId])
+  @@index([personalPersonId])
+}
+
+model HouseholdAccount {
+  id               String           @id @default(uuid()) @db.Uuid
+  householdId      String           @db.Uuid
+  personalPersonId String?          @db.Uuid
+  name             String           @db.VarChar(120)
+  scope            ExpenseScope     @default(HOUSEHOLD)
+  balanceCents     Int              @default(0)
+  isActive         Boolean          @default(true)
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  household        Household        @relation(fields: [householdId], references: [id], onDelete: Restrict)
+  personalPerson   HouseholdPerson? @relation("PersonalHouseholdAccount", fields: [personalPersonId], references: [id], onDelete: Restrict)
+
+  @@index([householdId, scope, isActive])
+  @@index([personalPersonId])
 }
 
 model InvoiceDocument {
@@ -526,18 +574,19 @@ model MonthlyPlanning {
 }
 
 model MonthlyPlanningContribution {
-  id                       String          @id @default(uuid()) @db.Uuid
-  monthlyPlanningId        String          @db.Uuid
-  householdPersonId        String          @db.Uuid
-  personName               String          @db.VarChar(120)
-  contributionBps          Int
-  standardHouseholdCents   Int
-  personalExpenseCents     Int
-  temporaryAdjustmentCents Int             @default(0)
-  totalRecommendedCents    Int
-  createdAt                DateTime        @default(now())
-  monthlyPlanning          MonthlyPlanning @relation(fields: [monthlyPlanningId], references: [id], onDelete: Restrict)
-  householdPerson          HouseholdPerson @relation(fields: [householdPersonId], references: [id], onDelete: Restrict)
+  id                            String          @id @default(uuid()) @db.Uuid
+  monthlyPlanningId             String          @db.Uuid
+  householdPersonId             String          @db.Uuid
+  personName                    String          @db.VarChar(120)
+  contributionBps               Int
+  confirmedPersonalBalanceCents Int?
+  standardHouseholdCents        Int
+  personalExpenseCents          Int
+  temporaryAdjustmentCents      Int             @default(0)
+  totalRecommendedCents         Int
+  createdAt                     DateTime        @default(now())
+  monthlyPlanning               MonthlyPlanning @relation(fields: [monthlyPlanningId], references: [id], onDelete: Restrict)
+  householdPerson               HouseholdPerson @relation(fields: [householdPersonId], references: [id], onDelete: Restrict)
 
   @@unique([monthlyPlanningId, householdPersonId])
   @@index([householdPersonId])

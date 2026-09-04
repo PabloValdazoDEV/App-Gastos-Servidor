@@ -84,7 +84,7 @@ describe('household domain services', () => {
         findFirst: vi.fn().mockResolvedValue({
           id: ids.ownerAccess,
           role: 'OWNER',
-          household: { ownerUserId: ids.owner },
+          household: { ownerUserId: ids.owner, name: 'Casa de prueba' },
         }),
         findUnique: vi.fn(),
       },
@@ -109,10 +109,12 @@ describe('household domain services', () => {
       auditLog: { create: vi.fn().mockResolvedValue({}) },
     };
     const prisma = transactionPrisma(transaction);
+    const sendInvitation = vi.fn().mockResolvedValue(true);
     const service = createInvitationsService({
       prisma,
       now: () => fixedDate,
       tokenFactory: () => rawToken,
+      emailService: { enabled: true, sendInvitation },
     });
 
     const result = await service.create({
@@ -123,11 +125,18 @@ describe('household domain services', () => {
 
     const createData = transaction.invitation.create.mock.calls[0][0].data;
     expect(result.token).toBe(rawToken);
+    expect(result.emailSent).toBe(true);
     expect(createData.tokenHash).toMatch(/^[a-f0-9]{64}$/);
     expect(createData.tokenHash).not.toBe(rawToken);
     expect(transaction.auditLog.create.mock.calls[0][0]).not.toContain(
       rawToken,
     );
+    expect(sendInvitation).toHaveBeenCalledWith({
+      householdName: 'Casa de prueba',
+      recipient: 'persona@example.com',
+      role: 'MEMBER',
+      token: rawToken,
+    });
   });
 
   it('rejects invitation acceptance by a different email before writing', async () => {
@@ -244,4 +253,3 @@ describe('household domain services', () => {
     expect(transaction.category.delete).not.toHaveBeenCalled();
   });
 });
-

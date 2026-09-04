@@ -90,6 +90,8 @@ export const createApp = ({
       config,
       authenticate,
       requireCsrf,
+      emailService,
+      logger,
     }),
   );
 

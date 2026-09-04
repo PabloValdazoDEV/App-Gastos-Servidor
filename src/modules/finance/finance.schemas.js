@@ -38,6 +38,11 @@ const scopeFields = {
   personalPersonId: uuid.nullable().optional(),
 };
 
+const updateScopeFields = {
+  scope: expenseScope.optional(),
+  personalPersonId: uuid.nullable().optional(),
+};
+
 function validateScope(body, context) {
   if (body.scope === 'PERSONAL' && !body.personalPersonId) {
     context.addIssue({
@@ -93,6 +98,7 @@ export const createRecurringExpenseSchema = recurringBase
 
 export const updateRecurringExpenseSchema = recurringBase
   .partial()
+  .extend(updateScopeFields)
   .extend({ isActive: z.boolean().optional() })
   .strict()
   .refine((body) => Object.keys(body).length > 0, 'Indica algún dato para actualizar.');
@@ -219,6 +225,7 @@ export const editPaymentSchema = z
 const invoiceBase = z.object({
   categoryId: uuid,
   amountCents: cents,
+  ...scopeFields,
   periodStart: civilDate,
   periodEnd: civilDate,
   invoiceDate: civilDate,
@@ -228,19 +235,70 @@ const invoiceBase = z.object({
 
 export const createInvoiceSchema = invoiceBase
   .strict()
-  .refine((body) => body.periodEnd >= body.periodStart, {
-    path: ['periodEnd'],
-    message: 'El fin del periodo no puede ser anterior al inicio.',
+  .superRefine((body, context) => {
+    validateScope(body, context);
+    if (body.periodEnd < body.periodStart) {
+      context.addIssue({
+        code: 'custom',
+        path: ['periodEnd'],
+        message: 'El fin del periodo no puede ser anterior al inicio.',
+      });
+    }
   });
 
 export const updateInvoiceSchema = invoiceBase
   .partial()
+  .extend(updateScopeFields)
   .strict()
   .refine((body) => Object.keys(body).length > 0, 'Indica algún dato para actualizar.');
 
 export const invoiceQuerySchema = z
-  .object({ categoryId: uuid.optional() })
+  .object({ categoryId: uuid.optional(), scope: expenseScope.optional() })
   .strict();
+
+export const createOneTimeExpenseSchema = z
+  .object({
+    categoryId: uuid,
+    name: nonEmptyText(120),
+    amountCents: cents,
+    ...scopeFields,
+    expenseDate: civilDate,
+    notes: optionalNotes,
+  })
+  .strict()
+  .superRefine((body, context) => validateScope(body, context));
+
+export const updateOneTimeExpenseSchema = createOneTimeExpenseSchema
+  .partial()
+  .extend(updateScopeFields)
+  .strict()
+  .refine((body) => Object.keys(body).length > 0, 'Indica algún dato para actualizar.');
+
+export const oneTimeExpenseQuerySchema = z
+  .object({ categoryId: uuid.optional(), scope: expenseScope.optional() })
+  .strict();
+
+const accountBase = z.object({
+  name: nonEmptyText(120),
+  scope: expenseScope.default('HOUSEHOLD'),
+  personalPersonId: uuid.nullable().optional(),
+  balanceCents: signedCents,
+});
+
+export const createAccountSchema = accountBase
+  .strict()
+  .superRefine((body, context) => validateScope(body, context));
+
+export const updateAccountSchema = accountBase
+  .partial()
+  .extend(updateScopeFields)
+  .strict()
+  .refine((body) => Object.keys(body).length > 0, 'Indica algún dato para actualizar.')
+  .superRefine((body, context) => {
+    if (body.scope || Object.hasOwn(body, 'personalPersonId')) {
+      validateScope({ scope: body.scope ?? 'HOUSEHOLD', personalPersonId: body.personalPersonId ?? null }, context);
+    }
+  });
 
 const variableEntry = z
   .object({
@@ -314,6 +372,16 @@ export const prepareMonthSchema = z
   .object({
     calculationDate: civilDate,
     confirmedBalanceCents: signedCents,
+    confirmedPersonalBalances: z
+      .array(
+        z
+          .object({
+            personId: uuid,
+            balanceCents: signedCents,
+          })
+          .strict(),
+      )
+      .default([]),
   })
   .strict();
 
@@ -355,6 +423,7 @@ export const financeParamsSchema = z
     variableMonthId: uuid.optional(),
     entryId: uuid.optional(),
     paymentId: uuid.optional(),
+    accountId: uuid.optional(),
     recoveryPlanId: uuid.optional(),
     planningId: uuid.optional(),
   })

@@ -93,6 +93,8 @@ export const createInvitationsService = ({
   invitationTtlDays = 7,
   now = () => new Date(),
   tokenFactory = generateInvitationToken,
+  emailService,
+  logger,
 }) => {
   if (!prisma) {
     throw new TypeError('createInvitationsService requires prisma.');
@@ -134,7 +136,7 @@ export const createInvitationsService = ({
       const expiresAt = expirationFrom(currentDate, invitationTtlDays);
 
       try {
-        const invitation = await runSerializableTransaction(
+        const result = await runSerializableTransaction(
           prisma,
           async (tx) => {
             const access = await requireHouseholdRole(tx, {
@@ -254,11 +256,34 @@ export const createInvitationsService = ({
               },
             });
 
-            return created;
+            return {
+              invitation: created,
+              householdName: access.household.name,
+            };
           },
         );
 
-        return { invitation, token: rawToken };
+        let emailSent = false;
+        if (
+          result.invitation.email &&
+          emailService?.enabled &&
+          typeof emailService.sendInvitation === 'function'
+        ) {
+          try {
+            emailSent = await emailService.sendInvitation({
+              householdName: result.householdName,
+              recipient: result.invitation.email,
+              role: result.invitation.role,
+              token: rawToken,
+            });
+          } catch (error) {
+            logger?.error('email.invitation.failed', {
+              errorName: error?.name ?? 'Error',
+            });
+          }
+        }
+
+        return { invitation: result.invitation, token: rawToken, emailSent };
       } catch (error) {
         throwMappedPrismaError(error, {
           uniqueCode: 'INVITATION_ALREADY_PENDING',
