@@ -9,6 +9,10 @@ const LEVEL_PRIORITY = Object.freeze({
 
 const SENSITIVE_KEY =
   /(?:authorization|authSecret|cookie|credential|database[_-]?url|password|passwd|private[_-]?key|secret|smtp[_-]?pass|token|api[_-]?key)/i;
+// Defense in depth: document extraction is private, even when a caller logs
+// a request/result object by mistake. Log only identifiers/status/usage.
+const PRIVATE_DOCUMENT_KEY =
+  /^(?:base64|bytes|content|documentBytes|file_data|image_url|input_image|input_file|extractedData|reviewedData|rawResponse|output_text|serialNumber|imei)$/i;
 
 const MAX_DEPTH = 6;
 const MAX_STRING_LENGTH = 2_000;
@@ -19,11 +23,13 @@ const truncate = (value) =>
     : value;
 
 const sanitize = (value, key, seen, depth) => {
-  if (key && SENSITIVE_KEY.test(key)) {
+  if (key && (SENSITIVE_KEY.test(key) || PRIVATE_DOCUMENT_KEY.test(key))) {
     return '[REDACTED]';
   }
 
   if (value === null || value === undefined) return value;
+  if (value instanceof Uint8Array || value instanceof ArrayBuffer) return '[REDACTED]';
+  if (typeof value === 'string' && /^data:[^,]*;base64,/i.test(value)) return '[REDACTED]';
   if (typeof value === 'string') return truncate(value);
   if (typeof value === 'number' || typeof value === 'boolean') return value;
   if (typeof value === 'bigint') return value.toString();

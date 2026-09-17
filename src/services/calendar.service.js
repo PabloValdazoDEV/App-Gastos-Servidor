@@ -43,9 +43,10 @@ function occurrencesInsideRange(expense, rangeStart, rangeEnd) {
           expense.intervalMonths,
           expense.usualDayOfMonth ??
             (expense.startDate &&
-            !['WEEKLY', 'ONE_TIME'].includes(expense.frequency)
+            !['WEEKLY', 'CUSTOM_WEEKS', 'ONE_TIME'].includes(expense.frequency)
               ? toCivilDate(expense.startDate).getUTCDate()
               : undefined),
+          expense.intervalWeeks,
         )
       : null;
   }
@@ -53,13 +54,7 @@ function occurrencesInsideRange(expense, rangeStart, rangeEnd) {
   return occurrences;
 }
 
-export function buildCalendar({
-  recurringExpenses,
-  payments = [],
-  today,
-  view = '30_DAYS',
-  anchorDate = today,
-}) {
+export function calendarRange({ view = '30_DAYS', anchorDate }) {
   const anchor = toCivilDate(anchorDate);
   let rangeStart;
   let rangeEnd;
@@ -78,14 +73,35 @@ export function buildCalendar({
     rangeEnd = addCalendarDays(anchor, 29);
   }
 
+  return { rangeStart, rangeEnd };
+}
+
+export function buildCalendar({
+  recurringExpenses,
+  payments = [],
+  purchaseSources = [],
+  today,
+  view = '30_DAYS',
+  anchorDate = today,
+}) {
+  const { rangeStart, rangeEnd } = calendarRange({ view, anchorDate });
   const scheduledEvents = recurringExpenses
     .filter((expense) => expense.isActive !== false && !expense.archivedAt)
     .flatMap((expense) =>
       occurrencesInsideRange(expense, rangeStart, rangeEnd).map((occurrenceDate) => ({
+        sourceType: 'RECURRING_EXPENSE',
         expenseId: expense.id,
         name: expense.name,
         dueDate: toIsoDate(occurrenceDate),
         amountCents: expense.amountCents,
+        expectedAmountCents: expense.amountCents,
+        actualAmountCents: null,
+        paymentDate: null,
+        paymentId: null,
+        notes: null,
+        canRegisterPayment:
+          compareCivilDates(occurrenceDate, expense.nextDueDate) === 0,
+        canEditPayment: false,
         scope: expense.scope,
         personalPersonId: expense.personalPersonId ?? null,
         personalPerson: expense.personalPerson ?? null,
@@ -117,6 +133,7 @@ export function buildCalendar({
     }
 
     eventsByOccurrence.set(eventKey(expense.id, dueDate), {
+      sourceType: 'RECURRING_EXPENSE',
       expenseId: expense.id,
       paymentId: payment.id ?? null,
       name: expense.name,
@@ -125,6 +142,9 @@ export function buildCalendar({
       expectedAmountCents: payment.expectedAmountCents ?? expense.amountCents,
       actualAmountCents: payment.actualAmountCents ?? null,
       paymentDate: payment.paymentDate ? toIsoDate(payment.paymentDate) : null,
+      notes: payment.notes ?? null,
+      canRegisterPayment: false,
+      canEditPayment: Boolean(payment.id),
       scope: expense.scope,
       personalPersonId: expense.personalPersonId ?? null,
       personalPerson: expense.personalPerson ?? null,
@@ -134,10 +154,20 @@ export function buildCalendar({
     });
   });
 
-  const events = [...eventsByOccurrence.values()].sort((left, right) => {
+  const purchaseEvents = purchaseSources.filter((source) => source.status !== 'CANCELLED'
+    && compareCivilDates(source.dueDate, rangeStart) >= 0 && compareCivilDates(source.dueDate, rangeEnd) <= 0)
+    .map((source) => ({
+      ...source,
+      amountCents: source.status === 'PAID' ? source.actualAmountCents : source.expectedAmountCents,
+      paymentDate: source.paidAt, paymentId: source.status === 'PAID' ? source.installmentId : null,
+      category: null, personalPerson: null, notes: null,
+      status: source.status === 'PAID' ? 'PAID' : deriveScheduledStatus(today, source.dueDate),
+      daysFromToday: differenceInCalendarDays(source.dueDate, today),
+    }));
+  const events = [...eventsByOccurrence.values(), ...purchaseEvents].sort((left, right) => {
     const dateComparison = left.dueDate.localeCompare(right.dueDate);
     if (dateComparison !== 0) return dateComparison;
-    return left.expenseId.localeCompare(right.expenseId);
+    return (left.expenseId ?? left.id).localeCompare(right.expenseId ?? right.id);
   });
 
   return {

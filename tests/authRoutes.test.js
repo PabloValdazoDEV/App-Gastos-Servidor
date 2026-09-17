@@ -46,6 +46,32 @@ const post = (agent, path, csrfToken) =>
     .set('X-CSRF-Token', csrfToken);
 
 describe('authentication routes', () => {
+  it('disables authentication rate limits and CSRF in development', async () => {
+    const { app } = createFixture({
+      nodeEnv: 'development',
+      rateLimit: {
+        general: { max: 1 },
+        auth: { max: 1 },
+      },
+    });
+    const agent = request.agent(app);
+    const credentials = {
+      email: 'missing@example.com',
+      password,
+    };
+
+    await agent
+      .post('/api/auth/login')
+      .set('Origin', origin)
+      .send(credentials)
+      .expect(401);
+    await agent
+      .post('/api/auth/login')
+      .set('Origin', origin)
+      .send(credentials)
+      .expect(401);
+  });
+
   it('registers, authenticates, lists sessions, and logs out', async () => {
     const { app, prisma } = createFixture();
     const agent = request.agent(app);

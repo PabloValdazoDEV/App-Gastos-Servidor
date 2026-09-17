@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { DEFAULT_RECEIPT_ANALYSIS_CONFIG } from './receiptAnalysis.js';
 
 const EMPTY_STRING = /^\s*$/;
 const TOKEN_TTL = /^\d+(?:ms|s|m|h|d)$/;
@@ -209,6 +210,13 @@ const envSchema = z
     GOOGLE_AUTH_ENABLED: envBoolean(false),
     EMAIL_ENABLED: envBoolean(false),
     WEB_PUSH_ENABLED: envBoolean(false),
+
+    OPENAI_API_KEY: optionalString(z.string().trim().min(1).max(512).regex(/^\S+$/)),
+    OPENAI_RECEIPT_MODEL: z.preprocess(emptyToUndefined, z.string().trim().min(1).max(120)
+      .regex(/^[A-Za-z0-9._:/-]+$/).default(DEFAULT_RECEIPT_ANALYSIS_CONFIG.receiptModel)),
+    OPENAI_RECEIPT_TIMEOUT_MS: envInteger(z.number().min(1000).max(120_000), DEFAULT_RECEIPT_ANALYSIS_CONFIG.timeoutMs),
+    OPENAI_RECEIPT_MAX_OUTPUT_TOKENS: envInteger(z.number().min(1024).max(16_384), DEFAULT_RECEIPT_ANALYSIS_CONFIG.maxOutputTokens),
+    AI_ANALYSIS_LIMIT_PER_HOUR: envInteger(z.number().min(1).max(1000), DEFAULT_RECEIPT_ANALYSIS_CONFIG.analysisLimitPerHour),
 
     GOOGLE_CLIENT_ID: optionalString(z.string().trim().min(1)),
     GOOGLE_CLIENT_SECRET: optionalString(z.string().min(1)),
@@ -463,6 +471,13 @@ export const loadEnv = (source = process.env) => {
       clientId: environment.GOOGLE_CLIENT_ID,
       clientSecret: environment.GOOGLE_CLIENT_SECRET,
       callbackUrl: environment.GOOGLE_CALLBACK_URL,
+    },
+    ai: {
+      apiKey: environment.OPENAI_API_KEY,
+      receiptModel: environment.OPENAI_RECEIPT_MODEL,
+      timeoutMs: environment.OPENAI_RECEIPT_TIMEOUT_MS,
+      maxOutputTokens: environment.OPENAI_RECEIPT_MAX_OUTPUT_TOKENS,
+      analysisLimitPerHour: environment.AI_ANALYSIS_LIMIT_PER_HOUR,
     },
     email: {
       host: environment.SMTP_HOST,

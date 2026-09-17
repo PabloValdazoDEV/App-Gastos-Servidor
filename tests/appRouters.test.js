@@ -30,6 +30,9 @@ describe('application domain router mounting', () => {
   it.each([
     ['/api/households', 'households'],
     [`/api/households/${householdId}/budget`, 'finance'],
+    [`/api/households/${householdId}/purchases`, 'purchases'],
+    [`/api/households/${householdId}/purchases/${householdId}/documents`, 'purchase documents'],
+    [`/api/households/${householdId}/purchases/${householdId}/documents/${householdId}/content`, 'private document content'],
     ['/api/notifications', 'notifications'],
   ])('mounts and protects %s (%s)', async (path) => {
     const { app } = createFixture();
@@ -54,6 +57,15 @@ describe('application domain router mounting', () => {
   it.each([
     ['post', '/api/households'],
     ['post', `/api/households/${householdId}/recurring-expenses`],
+    ['post', `/api/households/${householdId}/purchases`],
+    ['patch', `/api/households/${householdId}/purchases/${householdId}`],
+    ['delete', `/api/households/${householdId}/purchases/${householdId}`],
+    ['post', `/api/households/${householdId}/purchases/${householdId}/items`],
+    ['patch', `/api/households/${householdId}/purchases/${householdId}/items/${householdId}`],
+    ['delete', `/api/households/${householdId}/purchases/${householdId}/items/${householdId}`],
+    ['post', `/api/households/${householdId}/purchases/${householdId}/documents`],
+    ['patch', `/api/households/${householdId}/purchases/${householdId}/documents/${householdId}`],
+    ['delete', `/api/households/${householdId}/purchases/${householdId}/documents/${householdId}`],
     ['patch', '/api/notifications/read-all'],
   ])('shares CSRF protection on %s %s', async (method, path) => {
     const { app } = createFixture();
@@ -83,5 +95,16 @@ describe('application domain router mounting', () => {
       .expect(403);
 
     expect(response.body.code).toBe('CSRF_TOKEN_INVALID');
+  });
+
+  it.each(['application/json', 'application/x-www-form-urlencoded'])('authenticates raw purchase uploads before reading a disguised %s body', async (contentType) => {
+    const { app } = createFixture();
+    const response = await request(app)
+      .post(`/api/households/${householdId}/purchases/${householdId}/documents`)
+      .set('Origin', origin)
+      .set('Content-Type', contentType)
+      .send('x'.repeat(110_000))
+      .expect(401);
+    expect(response.body.code).toBe('AUTHENTICATION_REQUIRED');
   });
 });

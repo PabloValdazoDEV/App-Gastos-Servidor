@@ -12,6 +12,13 @@ const MONTH_STEPS = Object.freeze({
   YEARLY: 12,
 });
 
+export function customWeeksIntervalDays(intervalWeeks) {
+  if (!Number.isInteger(intervalWeeks) || intervalWeeks < 2 || intervalWeeks > 520) {
+    throw new RangeError('CUSTOM_WEEKS necesita intervalWeeks entero entre 2 y 520.');
+  }
+  return intervalWeeks * 7;
+}
+
 function restoreUsualDay(date, usualDayOfMonth) {
   if (!Number.isInteger(usualDayOfMonth)) return date;
   if (usualDayOfMonth < 1 || usualDayOfMonth > 31) {
@@ -29,9 +36,13 @@ export function calculateNextDueDate(
   frequency,
   intervalMonths,
   usualDayOfMonth,
+  intervalWeeks,
 ) {
   if (frequency === 'ONE_TIME') return null;
   if (frequency === 'WEEKLY') return addCalendarDays(currentDueDate, 7);
+  if (frequency === 'CUSTOM_WEEKS') {
+    return addCalendarDays(currentDueDate, customWeeksIntervalDays(intervalWeeks));
+  }
 
   const months =
     frequency === 'CUSTOM_MONTHS' ? intervalMonths : MONTH_STEPS[frequency];

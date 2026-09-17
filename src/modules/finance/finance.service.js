@@ -1,5 +1,8 @@
 import { calculateMonthlyStandardBudget } from '../../services/budgetCalculator.service.js';
-import { toCivilDate, toIsoDate } from '../../services/date.service.js';
+import { addCalendarDays, addCalendarMonths, startOfMonth, toCivilDate, toIsoDate } from '../../services/date.service.js';
+import { calculateMonthlySpendingProgress } from '../../services/monthlySpendingProgress.service.js';
+import { budgetMarginLookup } from './budgetMarginPreference.service.js';
+import { loadPurchaseFinancialSources, upcomingPurchasePayments } from './purchaseFinancialSources.js';
 import {
   calculateFinancialStatus,
   calculateSimulation,
@@ -40,16 +43,24 @@ function groupBy(items, keyFor) {
   return groups;
 }
 
-export function sanitizePlanningForViewer(planning, actorUserId, people = []) {
+export function sanitizePlanningForViewer(planning, actorUserId) {
   if (!planning || !actorUserId) return planning;
-  const viewerPersonId = people.find((person) => person.linkedUserId === actorUserId)?.id;
+  const identities = planning.breakdown?.personIdentitySnapshot;
+  const canViewPersonal = (contribution) => Array.isArray(identities) && identities.some((identity) =>
+    identity.personId === contribution.householdPersonId && identity.linkedUserId === actorUserId);
   return {
     ...planning,
+    // The original total also includes other people's private budget. Redacting
+    // only its lines would still expose that amount by subtraction.
+    recommendedBudgetCents: planning.householdBudgetCents + (
+      planning.contributions?.filter(canViewPersonal).reduce((sum, item) => sum + item.personalExpenseCents, 0) ?? 0
+    ),
+    personalHistoryRequiresConfirmation: !Array.isArray(identities),
     // The stored breakdown can contain every personal line. It is only an
     // internal calculation artifact, so never send it to a household member.
     breakdown: null,
     contributions: (planning.contributions ?? []).map((contribution) => {
-      if (contribution.householdPersonId === viewerPersonId) return contribution;
+      if (canViewPersonal(contribution)) return contribution;
       return {
         ...contribution,
         confirmedPersonalBalanceCents: null,
@@ -71,12 +82,16 @@ export function planningMatchesBudget(planning, budget) {
     left.personId.localeCompare(right.personId),
   );
 
-  return plannedContributions.length === budgetContributions.length && plannedContributions.every(
+  return planning.householdBudgetCents === budget?.householdBudgetCents &&
+    planning.recommendedBudgetCents === budget?.recommendedBudgetCents &&
+    plannedContributions.length === budgetContributions.length && plannedContributions.every(
     (contribution, index) => {
       const budgetContribution = budgetContributions[index];
       return (
         contribution.householdPersonId === budgetContribution.personId &&
-        contribution.contributionBps === budgetContribution.contributionBps
+        contribution.contributionBps === budgetContribution.contributionBps &&
+        contribution.standardHouseholdCents === budgetContribution.standardHouseholdCents &&
+        contribution.personalExpenseCents === budgetContribution.personalExpenseCents
       );
     },
   );
@@ -93,6 +108,8 @@ export function rebasePlanningToBudget(planning, budget) {
   );
   return {
     ...planning,
+    budgetChangedSincePreparation: true,
+    preparedHouseholdBudgetCents: planning.householdBudgetCents,
     recommendedBudgetCents: budget.recommendedBudgetCents,
     householdBudgetCents: budget.householdBudgetCents,
     contributions: budget.contributions.map((contribution) => {
@@ -128,8 +145,13 @@ export function availableCommonBalance(inputs, balanceOverride) {
     .reduce((sum, account) => sum + account.balanceCents, 0);
 }
 
-export async function loadFinancialInputs(database, householdId, actorUserId) {
-  const [household, recurringExpenses, invoices, variableMonths, oneTimeExpenses, accounts] =
+export function personalAccountRequiredCents(contribution) {
+  return contribution.personalExpenseCents ?? 0;
+}
+
+export async function loadFinancialInputs(database, householdId, actorUserId, calculationDate = new Date()) {
+  const firstDay = startOfMonth(calculationDate);
+  const [household, recurringExpenses, invoices, variableMonths, oneTimeExpenses, accounts, preferences, purchaseSources] =
     await Promise.all([
       database.household.findUnique({
         where: { id: householdId },
@@ -195,7 +217,16 @@ export async function loadFinancialInputs(database, householdId, actorUserId) {
             orderBy: [{ scope: 'asc' }, { name: 'asc' }],
           })
         : Promise.resolve([]),
+      database.budgetMarginPreference.findMany({
+        where: { householdId, ...visibleExpenseWhere(actorUserId) },
+      }),
+      loadPurchaseFinancialSources(database, {
+        householdId, actorUserId, from: firstDay,
+        to: addCalendarDays(addCalendarMonths(firstDay, 12), -1), includeOverdue: true,
+      }),
     ]);
+
+  const appliesMargin = budgetMarginLookup(preferences);
 
   const invoicesByCategory = groupBy(
     invoices,
@@ -208,6 +239,7 @@ export async function loadFinancialInputs(database, householdId, actorUserId) {
       scope: categoryInvoices[0].scope,
       personalPersonId: categoryInvoices[0].personalPersonId,
       invoices: categoryInvoices,
+      applySafetyMargin: appliesMargin('INVOICE', categoryInvoices[0]),
     }),
   );
   const variablesByOwner = groupBy(
@@ -221,6 +253,7 @@ export async function loadFinancialInputs(database, householdId, actorUserId) {
     scope: months[0].scope,
     personalPersonId: months[0].personalPersonId,
     months,
+    applySafetyMargin: appliesMargin('VARIABLE', months[0]),
   }));
 
   return {
@@ -229,6 +262,7 @@ export async function loadFinancialInputs(database, householdId, actorUserId) {
     invoices,
     variableMonths,
     oneTimeExpenses,
+    purchaseSources,
     accounts,
     invoiceGroups,
     variableGroups,
@@ -275,6 +309,7 @@ export function calculateBudgetFromInputs(inputs, calculationDate = new Date()) 
         invoiceCategoryCount: inputs.invoiceGroups.length,
         variableCategoryCount: inputs.variableGroups.length,
         oneTimeCount: inputs.oneTimeExpenses?.length ?? 0,
+        purchaseCount: inputs.purchaseSources?.length ?? 0,
       },
     };
   }
@@ -289,6 +324,7 @@ export function calculateBudgetFromInputs(inputs, calculationDate = new Date()) 
       invoiceGroups: inputs.invoiceGroups,
       variableGroups: inputs.variableGroups,
       oneTimeExpenses: inputs.oneTimeExpenses,
+      purchaseSources: inputs.purchaseSources,
     }),
   };
 }
@@ -299,31 +335,32 @@ export async function calculateHouseholdBudget(
   calculationDate,
   actorUserId,
 ) {
-  const inputs = await loadFinancialInputs(database, householdId, actorUserId);
+  const inputs = await loadFinancialInputs(database, householdId, actorUserId, dateOrToday(calculationDate));
   return { inputs, budget: calculateBudgetFromInputs(inputs, calculationDate) };
 }
 
-export function upcomingPayments(recurringExpenses, calculationDate) {
+export function upcomingPayments(recurringExpenses, calculationDate, purchaseSources = []) {
   const date = toCivilDate(calculationDate);
-  return recurringExpenses
-    .filter((expense) => expense.nextDueDate >= date)
+  return [...recurringExpenses
+    .filter((expense) => toCivilDate(expense.nextDueDate) >= date)
     .map((expense) => ({
+      sourceType: 'RECURRING_EXPENSE',
       expenseId: expense.id,
       name: expense.name,
       dueDate: toIsoDate(expense.nextDueDate),
       amountCents: expense.amountCents,
       scope: expense.scope,
       category: expense.category,
-    }))
+    })), ...upcomingPurchasePayments(purchaseSources, date)]
     .sort((left, right) => left.dueDate.localeCompare(right.dueDate));
 }
 
-export function dashboardDuePayments(recurringExpenses, calculationDate, daysAhead = 5) {
+export function dashboardDuePayments(recurringExpenses, calculationDate, daysAhead = 5, purchaseSources = []) {
   const date = toCivilDate(calculationDate);
   const horizon = new Date(date);
   horizon.setUTCDate(horizon.getUTCDate() + daysAhead);
 
-  return recurringExpenses
+  return [...recurringExpenses
     .filter(
       (expense) =>
         expense.isActive !== false &&
@@ -331,14 +368,34 @@ export function dashboardDuePayments(recurringExpenses, calculationDate, daysAhe
         toCivilDate(expense.nextDueDate) <= horizon,
     )
     .map((expense) => ({
+      sourceType: 'RECURRING_EXPENSE',
       expenseId: expense.id,
       name: expense.name,
       dueDate: toIsoDate(expense.nextDueDate),
       amountCents: expense.amountCents,
       scope: expense.scope,
       category: expense.category,
-    }))
+    })), ...upcomingPurchasePayments(purchaseSources, date, { includeOverdue: true, daysAhead })]
     .sort((left, right) => left.dueDate.localeCompare(right.dueDate));
+}
+
+export function loadMonthlyProgressPayments(database, householdId, calculationDate, actorUserId) {
+  const firstDay = startOfMonth(calculationDate);
+  return database.expensePayment.findMany({
+    where: {
+      status: 'PAID',
+      dueDate: { gte: firstDay, lt: addCalendarMonths(firstDay, 1) },
+      // Do not filter active/archived: an archived expense still consumed this
+      // month's budget. Parent ownership remains the authorization boundary.
+      recurringExpense: { householdId, ...visibleExpenseWhere(actorUserId) },
+    },
+    select: {
+      status: true,
+      dueDate: true,
+      actualAmountCents: true,
+      recurringExpense: { select: { scope: true, personalPersonId: true } },
+    },
+  });
 }
 
 export async function calculateDashboard(
@@ -369,16 +426,23 @@ export async function calculateDashboard(
         (personalAccountBalances.get(account.personalPersonId) ?? 0) + account.balanceCents,
       );
     });
-  const planningRecord = await database.monthlyPlanning.findUnique({
-    where: {
-      householdId_year_month: {
-        householdId,
-        year: date.getUTCFullYear(),
-        month: date.getUTCMonth() + 1,
+  const [planningRecord, activeRecoveryPlan, monthlyPayments] = await Promise.all([
+    database.monthlyPlanning.findUnique({
+      where: {
+        householdId_year_month: {
+          householdId,
+          year: date.getUTCFullYear(),
+          month: date.getUTCMonth() + 1,
+        },
       },
-    },
-    include: { contributions: { orderBy: { personName: 'asc' } } },
-  });
+      include: { contributions: { orderBy: { personName: 'asc' } } },
+    }),
+    database.recoveryPlan.findFirst({
+      where: { householdId, status: 'ACTIVE' },
+      orderBy: { createdAt: 'desc' },
+    }),
+    loadMonthlyProgressPayments(database, householdId, date, actorUserId),
+  ]);
   const balanceCents =
     balanceOverride === undefined &&
     planningRecord &&
@@ -386,14 +450,14 @@ export async function calculateDashboard(
       ? planningRecord.confirmedBalanceCents
       : availableCommonBalance(inputs, balanceOverride);
   const reserve = calculateTheoreticalReserve(inputs.recurringExpenses, date);
-  const payments = dashboardDuePayments(inputs.recurringExpenses, date);
+  const payments = dashboardDuePayments(inputs.recurringExpenses, date, 5, inputs.purchaseSources);
   const health = calculateFinancialStatus({
     theoreticalReserveCents: reserve.theoreticalReserveCents,
     relevantAvailableBalanceCents: balanceCents,
     upcomingPayments: payments,
   });
   const monthlyPersonalBalances = new Map(
-    (planningRecord?.contributions ?? [])
+    (sanitizePlanningForViewer(planningRecord, actorUserId)?.contributions ?? [])
       .filter((contribution) => contribution.confirmedPersonalBalanceCents !== null)
       .map((contribution) => [
         contribution.householdPersonId,
@@ -403,22 +467,16 @@ export async function calculateDashboard(
   const hasMonthlyPersonalBalances =
     Boolean(planningRecord) &&
     budget.contributions.length > 0 &&
-    budget.contributions.every((contribution) => monthlyPersonalBalances.has(contribution.personId));
+    budget.contributions.every((contribution) => (planningRecord.contributions ?? []).some((previous) =>
+      previous.householdPersonId === contribution.personId && previous.confirmedPersonalBalanceCents !== null));
   const planningIsUsable = Boolean(planningRecord) && hasMonthlyPersonalBalances;
+  const visiblePlanning = sanitizePlanningForViewer(planningRecord, actorUserId, inputs.household.people);
   const planning = planningIsUsable
-    ? sanitizePlanningForViewer(
-        planningMatchesBudget(planningRecord, budget)
-          ? planningRecord
-          : rebasePlanningToBudget(planningRecord, budget),
-        actorUserId,
-        inputs.household.people,
-      )
+    ? planningMatchesBudget(visiblePlanning, budget)
+      ? visiblePlanning
+      : rebasePlanningToBudget(visiblePlanning, budget)
     : null;
   const hasAccounts = accounts.length > 0 || hasMonthlyPersonalBalances;
-  const activeRecoveryPlan = await database.recoveryPlan.findFirst({
-    where: { householdId, status: 'ACTIVE' },
-    orderBy: { createdAt: 'desc' },
-  });
   const accountSummary = {
     hasAccounts,
     hasCommonAccounts,
@@ -433,13 +491,14 @@ export async function calculateDashboard(
     personal: (budget.contributions ?? [])
       .filter((contribution) => !actorUserId || contribution.personId === viewerPersonId)
       .map((contribution) => {
-        const balance = hasMonthlyPersonalBalances
+        const balance = hasMonthlyPersonalBalances && monthlyPersonalBalances.has(contribution.personId)
           ? monthlyPersonalBalances.get(contribution.personId)
           : personalAccountBalances.get(contribution.personId) ?? 0;
-        const required = contribution.totalStandardCents;
+        const required = personalAccountRequiredCents(contribution);
         return {
           personId: contribution.personId,
           personName: contribution.personName,
+          jointContributionCents: contribution.standardHouseholdCents ?? 0,
           balanceCents: balance,
           requiredCents: required,
           differenceCents: balance - required,
@@ -447,6 +506,45 @@ export async function calculateDashboard(
         };
       }),
   };
+
+  const viewerContribution = budget.contributions.find(
+    (contribution) => contribution.personId === viewerPersonId,
+  );
+  const hasViewerPurchaseHistory = Boolean(actorUserId) && inputs.purchaseSources.some((source) => source.scope === 'PERSONAL');
+  const hasViewerAccount = personalAccountBalances.has(viewerPersonId);
+  const viewerBalanceCents = hasViewerAccount
+    ? personalAccountBalances.get(viewerPersonId)
+    : monthlyPersonalBalances.get(viewerPersonId) ?? null;
+  const progress = calculateMonthlySpendingProgress({
+    calculationDate: date,
+    // Always use today's recommendation (including margins and one-offs), not
+    // a frozen planning contribution or its temporary recovery adjustment.
+    commonBudgetCents: budget.householdBudgetCents,
+    personalBudgetCents: viewerContribution?.personalExpenseCents ?? (hasViewerPurchaseHistory ? budget.personalBudgetCents : null),
+    viewerPersonId,
+    includeViewerPurchaseHistory: hasViewerPurchaseHistory,
+    payments: monthlyPayments,
+    variableMonths: inputs.variableMonths,
+    invoices: inputs.invoices,
+    purchaseSources: inputs.purchaseSources,
+    // Live registered accounts must win over the month's old preparation.
+    // Preparation also updates household.currentBalanceCents, our common fallback.
+    commonBalanceCents: availableCommonBalance(inputs, balanceOverride),
+    personalBalanceCents: viewerBalanceCents,
+  });
+  if (progress.monthlyProgress?.personal) {
+    progress.monthlyProgress.personal.personName = viewerContribution?.personName ?? 'Tú';
+  }
+  if (progress.cashCoverage) {
+    progress.cashCoverage.common.balanceSource = balanceOverride !== undefined
+      ? 'OVERRIDE'
+      : hasCommonAccounts ? 'ACCOUNTS' : 'HOUSEHOLD';
+    if (progress.cashCoverage.personal) {
+      progress.cashCoverage.personal.personName = viewerContribution?.personName ?? 'Tú';
+      progress.cashCoverage.personal.balanceSource = hasViewerAccount
+        ? 'ACCOUNTS' : 'MONTHLY_PLANNING';
+    }
+  }
 
   return {
     household: {
@@ -458,6 +556,7 @@ export async function calculateDashboard(
       contributionMode: inputs.household.contributionMode,
     },
     calculationDate: toIsoDate(date),
+    ...progress,
     budget,
     balanceCents,
     accounts: accounts.map((account) => ({
@@ -506,6 +605,7 @@ export async function calculateHouseholdSimulation(
     ...calculateSimulation({
       standardBudget: budget,
       recurringExpenses: inputs.recurringExpenses,
+      purchasePayments: upcomingPurchasePayments(inputs.purchaseSources ?? [], date),
       simulationDate: date,
       relevantAvailableBalanceCents:
         availableCommonBalance(inputs, balanceOverride),

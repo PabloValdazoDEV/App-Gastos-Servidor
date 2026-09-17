@@ -57,27 +57,37 @@ export const createAuthRouter = ({
     suppliedAuthenticate ?? createAuthenticate({ prisma, config });
   const requireCsrf =
     suppliedRequireCsrf ?? createCsrfProtection({ config });
-  const strictLimit = createAuthRateLimiter(config.rateLimit.auth);
-  const accountLimit = createAuthAccountRateLimiter(config.rateLimit.auth);
+  const rateLimits =
+    config.nodeEnv === 'development'
+      ? { account: [], strict: [] }
+      : {
+          account: [createAuthAccountRateLimiter(config.rateLimit.auth)],
+          strict: [createAuthRateLimiter(config.rateLimit.auth)],
+        };
 
   router.get('/csrf', createCsrfTokenHandler({ config }));
   router.post(
     '/register',
-    strictLimit,
-    accountLimit,
+    ...rateLimits.strict,
+    ...rateLimits.account,
     requireCsrf,
     validate({ body: registerSchema }),
     controller.register,
   );
   router.post(
     '/login',
-    strictLimit,
-    accountLimit,
+    ...rateLimits.strict,
+    ...rateLimits.account,
     requireCsrf,
     validate({ body: loginSchema }),
     controller.login,
   );
-  router.post('/refresh', strictLimit, requireCsrf, controller.refresh);
+  router.post(
+    '/refresh',
+    ...rateLimits.strict,
+    requireCsrf,
+    controller.refresh,
+  );
   router.post('/logout', requireCsrf, authenticate, controller.logout);
   router.post('/logout-all', requireCsrf, authenticate, controller.logoutAll);
   router.get('/me', authenticate, controller.me);
@@ -91,34 +101,34 @@ export const createAuthRouter = ({
   );
   router.post(
     '/forgot-password',
-    strictLimit,
-    accountLimit,
+    ...rateLimits.strict,
+    ...rateLimits.account,
     requireCsrf,
     validate({ body: forgotPasswordSchema }),
     controller.forgotPassword,
   );
   router.post(
     '/reset-password',
-    strictLimit,
+    ...rateLimits.strict,
     requireCsrf,
     validate({ body: resetPasswordSchema }),
     controller.resetPassword,
   );
   router.get(
     '/google/start',
-    strictLimit,
+    ...rateLimits.strict,
     validate({ query: googleStartSchema }),
     controller.googleStart,
   );
   router.get(
     '/google/callback',
-    strictLimit,
+    ...rateLimits.strict,
     validate({ query: googleCallbackSchema }),
     controller.googleCallback,
   );
   router.post(
     '/google/link/confirm',
-    strictLimit,
+    ...rateLimits.strict,
     requireCsrf,
     validate({ body: googleLinkSchema }),
     controller.googleLinkConfirm,

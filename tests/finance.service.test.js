@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   dashboardDuePayments,
+  personalAccountRequiredCents,
   planningMatchesBudget,
   rebasePlanningToBudget,
 } from '../src/modules/finance/finance.service.js';
@@ -137,5 +138,17 @@ describe('planningMatchesBudget', () => {
         standardHouseholdCents: 80_000,
       }),
     ]);
+  });
+});
+
+describe('resumen de cuentas personales', () => {
+  it('compara la cuenta personal solo con sus gastos personales', () => {
+    const contribution = {
+      personalExpenseCents: 52_788,
+      standardHouseholdCents: 54_337,
+      totalStandardCents: 107_125,
+    };
+
+    expect(personalAccountRequiredCents(contribution)).toBe(52_788);
   });
 });

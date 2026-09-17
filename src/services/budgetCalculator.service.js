@@ -11,6 +11,7 @@ import {
   roundDivide,
   splitAmount,
 } from './money.service.js';
+import { customWeeksIntervalDays } from './recurrence.service.js';
 
 const MONTH_DIVISORS = Object.freeze({
   MONTHLY: 1,
@@ -20,13 +21,17 @@ const MONTH_DIVISORS = Object.freeze({
   YEARLY: 12,
 });
 
-export function monthlyEquivalentCents({ amountCents, frequency, intervalMonths }) {
+export function monthlyEquivalentCents({ amountCents, frequency, intervalMonths, intervalWeeks }) {
   assertSafeInteger(amountCents, 'amountCents');
   if (amountCents < 0) throw new RangeError('amountCents no puede ser negativo.');
 
   if (frequency === 'ONE_TIME') return 0;
   if (frequency === 'WEEKLY') {
     return roundDivide(BigInt(amountCents) * 52n, 12n);
+  }
+  if (frequency === 'CUSTOM_WEEKS') {
+    customWeeksIntervalDays(intervalWeeks);
+    return roundDivide(BigInt(amountCents) * 52n, BigInt(intervalWeeks) * 12n);
   }
 
   if (frequency === 'CUSTOM_MONTHS') {
@@ -57,6 +62,21 @@ export function invoiceMonthlyEquivalentCents(invoice) {
   return roundDivide(BigInt(invoice.amountCents) * 3_044n, BigInt(periodDays) * 100n);
 }
 
+// Historical amounts never include a margin. This policy only controls the
+// recommendation, and missing preferences deliberately mean no margin.
+export function resolveBudgetMargin({ applySafetyMargin = false, categoryMarginBps, householdMarginBps } = {}) {
+  const availableMarginBps = resolveMarginBps({ categoryMarginBps, householdMarginBps });
+  const availableMarginSource = categoryMarginBps != null ? 'CATEGORY' : householdMarginBps != null ? 'HOUSEHOLD' : 'NONE';
+  const enabled = applySafetyMargin === true;
+  return {
+    applySafetyMargin: enabled,
+    effectiveMarginBps: enabled ? availableMarginBps : 0,
+    marginSource: enabled ? availableMarginSource : 'NONE',
+    availableMarginBps,
+    availableMarginSource,
+  };
+}
+
 function weightedInvoiceAverage(invoices) {
   if (invoices.length === 0) return null;
   const totals = invoices.reduce(
@@ -76,8 +96,9 @@ function invoicesInsideWindow(invoices, latestDate, windowMonths) {
 
 export function calculateInvoiceStatistics(
   invoices,
-  { householdMarginBps = 0, categoryMarginBps = null } = {},
+  { householdMarginBps = 0, categoryMarginBps = null, applySafetyMargin = false } = {},
 ) {
+  const margin = resolveBudgetMargin({ applySafetyMargin, householdMarginBps, categoryMarginBps });
   const sorted = [...invoices].sort(
     (left, right) => toCivilDate(left.periodEnd) - toCivilDate(right.periodEnd),
   );
@@ -87,34 +108,29 @@ export function calculateInvoiceStatistics(
       invoiceCount: 0,
       latestInvoice: null,
       historicalAverageCents: null,
+      baseCents: null,
       averages: { months3: null, months6: null, months12: null },
       recommendedCents: null,
-      effectiveMarginBps: resolveMarginBps({
-        categoryMarginBps,
-        householdMarginBps,
-      }),
+      ...margin,
     };
   }
 
   const latestInvoice = sorted.at(-1);
   const latestDate = latestInvoice.periodEnd;
-  const effectiveMarginBps = resolveMarginBps({
-    categoryMarginBps,
-    householdMarginBps,
-  });
   const historicalAverageCents = weightedInvoiceAverage(sorted);
 
   return {
     invoiceCount: sorted.length,
     latestInvoice,
     historicalAverageCents,
+    baseCents: historicalAverageCents,
     averages: {
       months3: weightedInvoiceAverage(invoicesInsideWindow(sorted, latestDate, 3)),
       months6: weightedInvoiceAverage(invoicesInsideWindow(sorted, latestDate, 6)),
       months12: weightedInvoiceAverage(invoicesInsideWindow(sorted, latestDate, 12)),
     },
-    recommendedCents: applyMarginCents(historicalAverageCents, effectiveMarginBps),
-    effectiveMarginBps,
+    recommendedCents: applyMarginCents(historicalAverageCents, margin.effectiveMarginBps),
+    ...margin,
   };
 }
 
@@ -146,6 +162,7 @@ export function calculateVariableStatistics(
     householdMarginBps = 0,
     categoryMarginBps = null,
     calculationDate = new Date(),
+    applySafetyMargin = false,
   } = {},
 ) {
   const calculationDateValue = toCivilDate(calculationDate);
@@ -159,7 +176,8 @@ export function calculateVariableStatistics(
     .sort((left, right) =>
       calendarMonthIndex(left.year, left.month) - calendarMonthIndex(right.year, right.month),
     );
-  const effectiveMarginBps = resolveMarginBps({
+  const margin = resolveBudgetMargin({
+    applySafetyMargin,
     categoryMarginBps,
     householdMarginBps,
   });
@@ -167,11 +185,13 @@ export function calculateVariableStatistics(
   if (completed.length === 0) {
     return {
       completedMonths: 0,
+      historicalAverageCents: null,
+      baseCents: null,
       latestMonth: null,
       averages: { months3: null, months6: null, months12: null },
       availableMonths: { months3: 0, months6: 0, months12: 0 },
       recommendedCents: null,
-      effectiveMarginBps,
+      ...margin,
     };
   }
 
@@ -194,6 +214,8 @@ export function calculateVariableStatistics(
 
   return {
     completedMonths: completed.length,
+    historicalAverageCents: roundDivide(completed.reduce((sum, month) => sum + month.totalCents, 0), completed.length),
+    baseCents: base,
     latestMonth: `${latest.year}-${String(latest.month).padStart(2, '0')}`,
     averages: {
       months3: months3.averageCents,
@@ -205,8 +227,8 @@ export function calculateVariableStatistics(
       months6: months6.availableMonths,
       months12: months12.availableMonths,
     },
-    recommendedCents: base === null ? null : applyMarginCents(base, effectiveMarginBps),
-    effectiveMarginBps,
+    recommendedCents: base === null ? null : applyMarginCents(base, margin.effectiveMarginBps),
+    ...margin,
   };
 }
 
@@ -230,6 +252,7 @@ export function calculateMonthlyStandardBudget({
   invoiceGroups = [],
   variableGroups = [],
   oneTimeExpenses = [],
+  purchaseSources = [],
 }) {
   const calculationDateValue = toCivilDate(calculationDate);
   const calculationYear = calculationDateValue.getUTCFullYear();
@@ -258,12 +281,13 @@ export function calculateMonthlyStandardBudget({
 
   const invoiceLines = invoiceGroups.flatMap((group) => {
     const statistics = calculateInvoiceStatistics(group.invoices ?? [], {
+      applySafetyMargin: group.applySafetyMargin,
       householdMarginBps,
       categoryMarginBps: categoryMargin(group),
     });
     if (statistics.recommendedCents === null) return [];
     return [{
-      id: group.categoryId,
+      id: `${group.categoryId}:${group.scope === 'PERSONAL' ? group.personalPersonId : 'HOUSEHOLD'}`,
       name: group.category?.name ?? 'Factura sin categoría',
       category: group.category,
       type: 'INVOICE',
@@ -278,6 +302,7 @@ export function calculateMonthlyStandardBudget({
 
   const variableLines = variableGroups.flatMap((group) => {
     const statistics = calculateVariableStatistics(group.months ?? [], {
+      applySafetyMargin: group.applySafetyMargin,
       calculationDate,
       householdMarginBps,
       categoryMarginBps: categoryMargin(group),
@@ -290,7 +315,7 @@ export function calculateMonthlyStandardBudget({
       type: 'VARIABLE',
       scope: group.scope ?? 'HOUSEHOLD',
       personalPersonId: group.personalPersonId ?? null,
-      baseCents: statistics.averages.months3,
+      baseCents: statistics.baseCents,
       effectiveMarginBps: statistics.effectiveMarginBps,
       amountCents: statistics.recommendedCents,
       statistics,
@@ -307,8 +332,8 @@ export function calculateMonthlyStandardBudget({
       );
     })
     .map((expense) => {
-      const effectiveMarginBps = resolveMarginBps({
-        expenseMarginBps: expense.safetyMarginOverrideBps,
+      const margin = resolveBudgetMargin({
+        applySafetyMargin: expense.applySafetyMargin,
         categoryMarginBps: categoryMargin(expense),
         householdMarginBps,
       });
@@ -320,13 +345,22 @@ export function calculateMonthlyStandardBudget({
         scope: expense.scope ?? 'HOUSEHOLD',
         personalPersonId: expense.personalPersonId ?? null,
         baseCents: expense.amountCents,
-        effectiveMarginBps,
-        amountCents: applyMarginCents(expense.amountCents, effectiveMarginBps),
+        ...margin,
+        amountCents: applyMarginCents(expense.amountCents, margin.effectiveMarginBps),
         expenseDate: expense.expenseDate,
       };
     });
 
-  const lines = [...recurringLines, ...invoiceLines, ...variableLines, ...oneTimeLines];
+  const purchaseLines = purchaseSources
+    .filter((source) => ['PLANNED', 'PAID'].includes(source.status)
+      && monthKey(source.budgetDate) === monthKey(calculationDateValue))
+    .map((source) => ({
+      ...source, type: 'PURCHASE', category: null,
+      baseCents: source.expectedAmountCents, amountCents: source.expectedAmountCents,
+      applySafetyMargin: false, effectiveMarginBps: 0, marginSource: 'NONE',
+      expenseDate: source.budgetDate,
+    }));
+  const lines = [...recurringLines, ...invoiceLines, ...variableLines, ...oneTimeLines, ...purchaseLines];
   const householdLines = lines.filter((line) => line.scope === 'HOUSEHOLD');
   const personalLines = lines.filter((line) => line.scope === 'PERSONAL');
   const householdBaseBudgetCents = householdLines.reduce(
@@ -342,6 +376,7 @@ export function calculateMonthlyStandardBudget({
     0,
   );
   const personalTotals = sumByPerson(personalLines);
+  const personalBudgetCents = personalLines.reduce((sum, line) => sum + line.amountCents, 0);
   const activePeople = people.filter((person) => person.isActive !== false && !person.archivedAt);
   const shares = splitAmount(householdBudgetCents, activePeople);
   const shareMap = new Map(shares.map((share) => [share.id, share.amountCents]));
@@ -363,13 +398,12 @@ export function calculateMonthlyStandardBudget({
     householdBudgetCents,
     householdBaseBudgetCents,
     householdMarginCents: householdBudgetCents - householdBaseBudgetCents,
-    personalBudgetCents: [...personalTotals.values()].reduce((sum, value) => sum + value, 0),
+    personalBudgetCents,
     personalBaseBudgetCents,
     personalMarginCents:
-      [...personalTotals.values()].reduce((sum, value) => sum + value, 0) -
-      personalBaseBudgetCents,
+      personalBudgetCents - personalBaseBudgetCents,
     recommendedBudgetCents:
-      householdBudgetCents + [...personalTotals.values()].reduce((sum, value) => sum + value, 0),
+      householdBudgetCents + personalBudgetCents,
     contributions,
     lines,
     sourceCoverage: {
@@ -377,6 +411,7 @@ export function calculateMonthlyStandardBudget({
       invoiceCategoryCount: invoiceLines.length,
       variableCategoryCount: variableLines.length,
       oneTimeCount: oneTimeLines.length,
+      purchaseCount: purchaseLines.length,
       latestVariableMonth: variableLines
         .map((line) => line.statistics.latestMonth)
         .filter(Boolean)

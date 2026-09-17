@@ -135,4 +135,28 @@ describe('loadEnv', () => {
       ),
     ).toThrow('Invalid environment variable PRIVACY_CONTROLLER_CONTACT_EMAIL');
   });
+
+  it('starts without an OpenAI key and centralizes the optional receipt-analysis defaults', () => {
+    expect(loadEnv(validEnvironment({ OPENAI_API_KEY: '  ' })).ai).toEqual({
+      apiKey: undefined, receiptModel: 'gpt-5.6-luna', timeoutMs: 60_000, maxOutputTokens: 8192, analysisLimitPerHour: 10,
+    });
+  });
+
+  it('accepts server-only AI model/limits configuration and freezes it', () => {
+    const config = loadEnv(validEnvironment({ OPENAI_API_KEY: 'test-key', OPENAI_RECEIPT_MODEL: 'gpt-5.6-sol', AI_ANALYSIS_LIMIT_PER_HOUR: '7', OPENAI_RECEIPT_TIMEOUT_MS: '45000', OPENAI_RECEIPT_MAX_OUTPUT_TOKENS: '4096' }));
+    expect(config.ai).toEqual({ apiKey: 'test-key', receiptModel: 'gpt-5.6-sol', timeoutMs: 45_000, maxOutputTokens: 4096, analysisLimitPerHour: 7 });
+    expect(Object.isFrozen(config.ai)).toBe(true);
+  });
+
+  it.each([
+    ['AI_ANALYSIS_LIMIT_PER_HOUR', '0'], ['AI_ANALYSIS_LIMIT_PER_HOUR', '1.5'],
+    ['OPENAI_RECEIPT_TIMEOUT_MS', '999'], ['OPENAI_RECEIPT_TIMEOUT_MS', '120001'],
+    ['OPENAI_RECEIPT_MAX_OUTPUT_TOKENS', '1023'], ['OPENAI_RECEIPT_MAX_OUTPUT_TOKENS', '16385'],
+    ['OPENAI_RECEIPT_MODEL', 'not a model'], ['OPENAI_API_KEY', 'private key with spaces'],
+  ])('rejects invalid %s without exposing its value', (variable, value) => {
+    const failure = (() => { try { loadEnv(validEnvironment({ [variable]: value })); } catch (error) { return error; } })();
+    expect(failure).toBeInstanceOf(EnvironmentValidationError);
+    expect(failure.message).toContain(variable);
+    expect(failure.message).not.toContain(value);
+  });
 });

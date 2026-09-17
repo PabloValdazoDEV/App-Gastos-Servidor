@@ -24,6 +24,7 @@ const civilDate = z
 const expenseScope = z.enum(['HOUSEHOLD', 'PERSONAL']);
 const expenseFrequency = z.enum([
   'WEEKLY',
+  'CUSTOM_WEEKS',
   'MONTHLY',
   'BIMONTHLY',
   'QUARTERLY',
@@ -60,13 +61,48 @@ function validateScope(body, context) {
   }
 }
 
+const recurringIntervalFields = {
+  frequency: expenseFrequency,
+  intervalMonths: z.number().int().min(1).max(120).nullable().optional(),
+  intervalWeeks: z.number().int().min(2).max(520).nullable().optional(),
+};
+
+function validateRecurringIntervals(body, context) {
+  for (const [frequency, field, message] of [
+    ['CUSTOM_MONTHS', 'intervalMonths', 'Indica cada cuántos meses se repite.'],
+    ['CUSTOM_WEEKS', 'intervalWeeks', 'Indica cada cuántas semanas se repite (entre 2 y 520).'],
+  ]) {
+    if (body.frequency === frequency && body[field] == null) {
+      context.addIssue({
+        code: 'custom',
+        path: [field],
+        message,
+      });
+    }
+  }
+}
+
+function normalizeRecurringIntervals(body) {
+  return {
+    frequency: body.frequency,
+    intervalMonths: body.frequency === 'CUSTOM_MONTHS' ? body.intervalMonths : null,
+    intervalWeeks: body.frequency === 'CUSTOM_WEEKS' ? body.intervalWeeks : null,
+  };
+}
+
+// PATCH validates the effective schedule after merging with the persisted one.
+// This allows partial edits but never leaves incompatible interval fields behind.
+export const recurringIntervalsSchema = z.object(recurringIntervalFields)
+  .strict()
+  .superRefine(validateRecurringIntervals)
+  .transform(normalizeRecurringIntervals);
+
 const recurringBase = z.object({
   categoryId: uuid,
   name: nonEmptyText(120),
   amountCents: cents,
   ...scopeFields,
-  frequency: expenseFrequency,
-  intervalMonths: z.number().int().min(1).max(120).nullable().optional(),
+  ...recurringIntervalFields,
   startDate: civilDate,
   endDate: civilDate.nullable().optional(),
   nextDueDate: civilDate,
@@ -80,13 +116,7 @@ export const createRecurringExpenseSchema = recurringBase
   .strict()
   .superRefine((body, context) => {
     validateScope(body, context);
-    if (body.frequency === 'CUSTOM_MONTHS' && !body.intervalMonths) {
-      context.addIssue({
-        code: 'custom',
-        path: ['intervalMonths'],
-        message: 'Indica cada cuántos meses se repite.',
-      });
-    }
+    validateRecurringIntervals(body, context);
     if (body.endDate && body.endDate < body.startDate) {
       context.addIssue({
         code: 'custom',
@@ -94,12 +124,13 @@ export const createRecurringExpenseSchema = recurringBase
         message: 'La fecha final no puede ser anterior a la inicial.',
       });
     }
-  });
+  })
+  .transform((body) => ({ ...body, ...normalizeRecurringIntervals(body) }));
 
 export const updateRecurringExpenseSchema = recurringBase
   .partial()
   .extend(updateScopeFields)
-  .extend({ isActive: z.boolean().optional() })
+  .extend({ isActive: z.boolean().optional(), remindersEnabled: z.boolean().optional() })
   .strict()
   .refine((body) => Object.keys(body).length > 0, 'Indica algún dato para actualizar.');
 
@@ -256,8 +287,20 @@ export const invoiceQuerySchema = z
   .object({ categoryId: uuid.optional(), scope: expenseScope.optional() })
   .strict();
 
+export const budgetMarginPreferenceSchema = z.object({
+  expenseType: z.enum(['INVOICE', 'VARIABLE']),
+  categoryId: uuid,
+  ...scopeFields,
+  applySafetyMargin: z.boolean(),
+}).strict().superRefine(validateScope);
+
+export const budgetMarginPreferenceQuerySchema = z.object({
+  expenseType: z.enum(['INVOICE', 'VARIABLE']).optional(),
+}).strict();
+
 export const createOneTimeExpenseSchema = z
   .object({
+    applySafetyMargin: z.boolean().default(false),
     categoryId: uuid,
     name: nonEmptyText(120),
     amountCents: cents,
@@ -270,7 +313,7 @@ export const createOneTimeExpenseSchema = z
 
 export const updateOneTimeExpenseSchema = createOneTimeExpenseSchema
   .partial()
-  .extend(updateScopeFields)
+  .extend({ ...updateScopeFields, applySafetyMargin: z.boolean().optional() })
   .strict()
   .refine((body) => Object.keys(body).length > 0, 'Indica algún dato para actualizar.');
 

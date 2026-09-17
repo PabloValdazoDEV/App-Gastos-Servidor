@@ -42,8 +42,43 @@ enum ExpenseScope {
   PERSONAL
 }
 
+enum PurchaseOwnershipType {
+  HOUSEHOLD
+  PERSONAL
+  SPLIT
+}
+
+enum PurchaseWarrantySource {
+  DURATION
+  EXPLICIT_DATE
+}
+
+enum PurchaseDocumentType {
+  RECEIPT
+  INVOICE
+  WARRANTY
+  OTHER
+}
+
+enum PurchasePaymentMethod {
+  UPFRONT
+  FINANCED
+}
+
+enum PurchaseInstallmentStatus {
+  PLANNED
+  PAID
+  CANCELLED
+}
+
+enum BudgetMarginExpenseType {
+  INVOICE
+  VARIABLE
+}
+
 enum ExpenseFrequency {
   WEEKLY
+  CUSTOM_WEEKS
   MONTHLY
   BIMONTHLY
   QUARTERLY
@@ -135,6 +170,30 @@ enum AuditAction {
   MONTH_PREPARED
   RECOVERY_PLAN_CHANGED
   NOTIFICATION_PREFERENCE_CHANGED
+  PURCHASE_CREATED
+  PURCHASE_CHANGED
+  PURCHASE_ARCHIVED
+  PURCHASE_ITEM_CREATED
+  PURCHASE_ITEM_CHANGED
+  PURCHASE_ITEM_DELETED
+  PURCHASE_DOCUMENT_ADDED
+  PURCHASE_DOCUMENT_CHANGED
+  PURCHASE_DOCUMENT_DELETED
+  PURCHASE_PAYMENT_METHOD_CHANGED
+  PURCHASE_PAYMENT_CHANGED
+  PURCHASE_FINANCING_CREATED
+  PURCHASE_FINANCING_CHANGED
+  PURCHASE_INSTALLMENT_PAID
+  PURCHASE_INSTALLMENT_CORRECTED
+  PURCHASE_DOCUMENT_ANALYZED
+  PURCHASE_DOCUMENT_ANALYSIS_FAILED
+  PURCHASE_DOCUMENT_ANALYSIS_CONFIRMED
+}
+
+enum PurchaseDocumentAnalysisStatus {
+  COMPLETED
+  FAILED
+  CONFIRMED
 }
 
 model User {
@@ -162,6 +221,9 @@ model User {
   recoveryPlansCreated     RecoveryPlan[]             @relation("RecoveryPlanCreator")
   paymentsRecorded         ExpensePayment[]           @relation("PaymentRecorder")
   invoiceDocumentsUploaded InvoiceDocument[]          @relation("InvoiceDocumentUploader")
+  purchaseDocumentsUploaded PurchaseDocument[]        @relation("PurchaseDocumentUploader")
+  purchaseDocumentAnalysesRequested PurchaseDocumentAnalysis[] @relation("PurchaseAnalysisRequester")
+  purchaseDocumentAnalysesConfirmed PurchaseDocumentAnalysis[] @relation("PurchaseAnalysisConfirmer")
   notificationPreference   NotificationPreference?
   reminderRules            ReminderRule[]
   notifications            Notification[]
@@ -256,6 +318,8 @@ model Household {
   utilityInvoices       UtilityInvoice[]
   variableExpenseMonths VariableExpenseMonth[]
   oneTimeExpenses       OneTimeExpense[]
+  purchases             Purchase[]
+  budgetMarginPreferences BudgetMarginPreference[]
   accounts              HouseholdAccount[]
   balanceSnapshots      HouseholdBalanceSnapshot[]
   monthlyPlannings      MonthlyPlanning[]
@@ -282,9 +346,12 @@ model HouseholdPerson {
   linkedUser             User?                         @relation("LinkedHouseholdUser", fields: [linkedUserId], references: [id], onDelete: SetNull)
   invitations            Invitation[]
   personalExpenses       RecurringExpense[]            @relation("PersonalRecurringExpense")
+  personalPurchases      Purchase[]                    @relation("PersonalPurchase")
+  purchaseShares         PurchaseShare[]
   personalInvoices       UtilityInvoice[]              @relation("PersonalInvoice")
   variableExpenseMonths  VariableExpenseMonth[]        @relation("PersonalVariableExpense")
   oneTimeExpenses        OneTimeExpense[]              @relation("PersonalOneTimeExpense")
+  budgetMarginPreferences BudgetMarginPreference[]
   accounts               HouseholdAccount[]            @relation("PersonalHouseholdAccount")
   planningContributions  MonthlyPlanningContribution[]
 
@@ -350,6 +417,7 @@ model Category {
   utilityInvoices       UtilityInvoice[]
   variableExpenseMonths VariableExpenseMonth[]
   oneTimeExpenses       OneTimeExpense[]
+  budgetMarginPreferences BudgetMarginPreference[]
 
   @@unique([householdId, slug])
   @@index([householdId, archivedAt])
@@ -365,6 +433,7 @@ model RecurringExpense {
   scope                   ExpenseScope     @default(HOUSEHOLD)
   frequency               ExpenseFrequency
   intervalMonths          Int?
+  intervalWeeks           Int?
   startDate               DateTime         @db.Date
   endDate                 DateTime?        @db.Date
   nextDueDate             DateTime         @db.Date
@@ -434,6 +503,26 @@ model UtilityInvoice {
   @@index([personalPersonId])
 }
 
+model BudgetMarginPreference {
+  id                String                  @id @default(uuid()) @db.Uuid
+  householdId       String                  @db.Uuid
+  categoryId        String                  @db.Uuid
+  expenseType       BudgetMarginExpenseType
+  scope             ExpenseScope            @default(HOUSEHOLD)
+  personalPersonId  String?                 @db.Uuid
+  ownerKey          String                  @db.VarChar(40)
+  applySafetyMargin Boolean                 @default(false)
+  createdAt         DateTime                @default(now())
+  updatedAt         DateTime                @updatedAt
+  household         Household               @relation(fields: [householdId], references: [id], onDelete: Restrict)
+  category          Category                @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  personalPerson    HouseholdPerson?        @relation(fields: [personalPersonId], references: [id], onDelete: Cascade)
+
+  @@unique([householdId, expenseType, categoryId, ownerKey], map: "BudgetMarginPreference_group_key")
+  @@index([categoryId])
+  @@index([personalPersonId])
+}
+
 model OneTimeExpense {
   id               String           @id @default(uuid()) @db.Uuid
   householdId      String           @db.Uuid
@@ -443,6 +532,7 @@ model OneTimeExpense {
   amountCents      Int
   scope            ExpenseScope     @default(HOUSEHOLD)
   expenseDate      DateTime         @db.Date
+  applySafetyMargin Boolean         @default(false)
   notes            String?          @db.VarChar(2000)
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
@@ -702,6 +792,163 @@ model PushSubscription {
   user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+}
+
+model Purchase {
+  id               String                @id @default(uuid()) @db.Uuid
+  householdId      String                @db.Uuid
+  merchant         String?               @db.VarChar(200)
+  purchaseDate     DateTime              @db.Date
+  totalCents       Int
+  paymentMethod    PurchasePaymentMethod @default(UPFRONT)
+  paymentDate      DateTime?             @db.Date
+  paidAmountCents  Int?
+  paymentAllocationSnapshot Json?
+  ownershipType    PurchaseOwnershipType @default(HOUSEHOLD)
+  personalPersonId String?               @db.Uuid
+  notes            String?               @db.VarChar(2000)
+  archivedAt       DateTime?
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+  household        Household             @relation(fields: [householdId], references: [id], onDelete: Restrict)
+  personalPerson   HouseholdPerson?      @relation("PersonalPurchase", fields: [personalPersonId], references: [id], onDelete: Restrict)
+  shares           PurchaseShare[]
+  items            PurchaseItem[]
+  documents        PurchaseDocument[]
+  financing        PurchaseFinancing?
+
+  @@index([householdId, archivedAt, purchaseDate])
+  @@index([personalPersonId])
+}
+
+model PurchaseShare {
+  id                String          @id @default(uuid()) @db.Uuid
+  purchaseId        String          @db.Uuid
+  householdPersonId String          @db.Uuid
+  shareBps          Int
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  purchase          Purchase        @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  householdPerson   HouseholdPerson @relation(fields: [householdPersonId], references: [id], onDelete: Restrict)
+
+  @@unique([purchaseId, householdPersonId])
+  @@index([householdPersonId])
+}
+
+model PurchaseItem {
+  id                     String                  @id @default(uuid()) @db.Uuid
+  purchaseId             String                  @db.Uuid
+  name                   String                  @db.VarChar(200)
+  brand                  String?                 @db.VarChar(120)
+  model                  String?                 @db.VarChar(120)
+  quantity               Int                     @default(1)
+  priceCents             Int?
+  serialNumber           String?                 @db.VarChar(100)
+  imei                   String?                 @db.VarChar(100)
+  warrantySource         PurchaseWarrantySource?
+  warrantyDurationMonths Int?
+  warrantyEndsAt         DateTime?               @db.Date
+  notes                  String?                 @db.VarChar(2000)
+  createdAt              DateTime                @default(now())
+  updatedAt              DateTime                @updatedAt
+  purchase               Purchase                @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  documents              PurchaseDocument[]
+
+  @@index([purchaseId])
+}
+
+model PurchaseFinancing {
+  id                       String                @id @default(uuid()) @db.Uuid
+  purchaseId               String                @unique @db.Uuid
+  provider                 String?               @db.VarChar(200)
+  downPaymentCents         Int                   @default(0)
+  downPaymentPaidAt        DateTime?             @db.Date
+  downPaymentAllocationSnapshot Json?
+  financedPrincipalCents  Int
+  installmentCount        Int
+  installmentAmountCents  Int
+  firstInstallmentDate    DateTime              @db.Date
+  financingTotalCents     Int
+  createdAt               DateTime              @default(now())
+  updatedAt               DateTime              @updatedAt
+  purchase                Purchase              @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  installments            PurchaseInstallment[]
+}
+
+model PurchaseInstallment {
+  id                    String                    @id @default(uuid()) @db.Uuid
+  purchaseFinancingId   String                    @db.Uuid
+  sequence              Int
+  dueDate               DateTime                  @db.Date
+  expectedAmountCents   Int
+  actualAmountCents     Int?
+  paidAt                DateTime?                 @db.Date
+  paymentAllocationSnapshot Json?
+  status                PurchaseInstallmentStatus @default(PLANNED)
+  notes                 String?                   @db.VarChar(2000)
+  createdAt             DateTime                  @default(now())
+  updatedAt             DateTime                  @updatedAt
+  financing             PurchaseFinancing         @relation(fields: [purchaseFinancingId], references: [id], onDelete: Cascade)
+
+  @@unique([purchaseFinancingId, sequence])
+  @@index([purchaseFinancingId, status, dueDate])
+}
+
+model PurchaseDocument {
+  id               String               @id @default(uuid()) @db.Uuid
+  purchaseId       String               @db.Uuid
+  purchaseItemId   String?              @db.Uuid
+  uploadedByUserId String               @db.Uuid
+  type             PurchaseDocumentType @default(OTHER)
+  filename         String               @db.VarChar(255)
+  contentType      String               @db.VarChar(100)
+  sizeBytes        Int
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+  purchase         Purchase             @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  purchaseItem     PurchaseItem?         @relation(fields: [purchaseItemId], references: [id], onDelete: SetNull)
+  uploadedBy       User                 @relation("PurchaseDocumentUploader", fields: [uploadedByUserId], references: [id], onDelete: Restrict)
+  storedContent    PurchaseDocumentContent?
+  analyses         PurchaseDocumentAnalysis[]
+
+  @@index([purchaseId, createdAt])
+  @@index([purchaseItemId])
+  @@index([uploadedByUserId])
+}
+
+// Private PostgreSQL adapter only. Never select this relation in API metadata.
+model PurchaseDocumentContent {
+  documentId String           @id @db.Uuid
+  content    Bytes
+  document   PurchaseDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+}
+
+// Append-only extraction attempts. Reviewed data never replaces provider output.
+model PurchaseDocumentAnalysis {
+  id                       String                         @id @default(uuid()) @db.Uuid
+  purchaseDocumentId       String                         @db.Uuid
+  requestedByUserId         String                         @db.Uuid
+  provider                 String                         @db.VarChar(40)
+  model                    String                         @db.VarChar(120)
+  status                   PurchaseDocumentAnalysisStatus
+  extractedData            Json?
+  reviewedData             Json?
+  sourcePurchaseVersion    String                         @db.Char(64)
+  inputTokens              Int?
+  outputTokens             Int?
+  totalTokens              Int?
+  failureCode              String?                        @db.VarChar(100)
+  createdAt                DateTime                       @default(now())
+  updatedAt                DateTime                       @updatedAt
+  confirmedAt              DateTime?
+  confirmedByUserId        String?                        @db.Uuid
+  document                 PurchaseDocument               @relation(fields: [purchaseDocumentId], references: [id], onDelete: Cascade)
+  requestedBy              User                           @relation("PurchaseAnalysisRequester", fields: [requestedByUserId], references: [id], onDelete: Restrict)
+  confirmedBy              User?                          @relation("PurchaseAnalysisConfirmer", fields: [confirmedByUserId], references: [id], onDelete: Restrict)
+
+  @@index([purchaseDocumentId, createdAt])
+  @@index([requestedByUserId, createdAt])
+  @@index([confirmedByUserId])
 }
 
 model AuditLog {

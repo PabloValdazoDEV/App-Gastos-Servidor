@@ -95,6 +95,16 @@ describe('HTTP foundation', () => {
     expect(response.body.success).toBe(false);
   });
 
+  it('disables the general API rate limit in development', async () => {
+    const app = buildApp({
+      nodeEnv: 'development',
+      rateLimit: { general: { windowMs: 60_000, max: 1 } },
+    });
+
+    await request(app).get('/api/unknown').expect(404);
+    await request(app).get('/api/unknown').expect(404);
+  });
+
   it('does not rate-limit the liveness health check', async () => {
     const app = buildApp({
       rateLimit: { general: { windowMs: 60_000, max: 1 } },

@@ -1,4 +1,5 @@
 import {
+  addCalendarDays,
   addCalendarMonths,
   compareCivilDates,
   differenceInCalendarDays,
@@ -11,6 +12,7 @@ import {
   roundDivide,
   splitAmount,
 } from './money.service.js';
+import { customWeeksIntervalDays } from './recurrence.service.js';
 
 const RECOMMENDED_RECOVERY_MONTHS = 12;
 
@@ -24,6 +26,12 @@ const PERIOD_MONTHS = Object.freeze({
 
 function inferCycleStart(expense) {
   if (expense.cycleStartDate) return toCivilDate(expense.cycleStartDate);
+  if (expense.frequency === 'CUSTOM_WEEKS') {
+    return addCalendarDays(
+      expense.nextDueDate,
+      -customWeeksIntervalDays(expense.intervalWeeks),
+    );
+  }
   if (expense.frequency === 'WEEKLY') {
     const next = toCivilDate(expense.nextDueDate);
     next.setUTCDate(next.getUTCDate() - 7);
@@ -46,7 +54,12 @@ export function calculateTheoreticalReserve(expenses, simulationDate) {
         expense.isActive !== false &&
         !expense.archivedAt &&
         expense.frequency !== 'MONTHLY' &&
-        expense.frequency !== 'WEEKLY',
+        expense.frequency !== 'WEEKLY' &&
+        // Like weekly/monthly charges, 2–4-week cycles are covered by the
+        // standard monthly contribution. Longer cycles retain a reserve;
+        // neither this threshold nor the cycle arithmetic converts weeks to months.
+        (expense.frequency !== 'CUSTOM_WEEKS' ||
+          customWeeksIntervalDays(expense.intervalWeeks) > 28),
     )
     .map((expense) => {
       const cycleStart = inferCycleStart(expense);
@@ -115,12 +128,14 @@ export function calculateSimulation({
   recurringExpenses,
   simulationDate,
   relevantAvailableBalanceCents,
+  purchasePayments = [],
 }) {
   const reserve = calculateTheoreticalReserve(recurringExpenses, simulationDate);
-  const upcomingPayments = recurringExpenses
+  const recurringPayments = recurringExpenses
     .filter((expense) => expense.isActive !== false && !expense.archivedAt)
     .map((expense) => ({
       expenseId: expense.id,
+      sourceType: 'RECURRING_EXPENSE',
       name: expense.name,
       dueDate: toIsoDate(expense.nextDueDate),
       amountCents: expense.amountCents,
@@ -129,6 +144,9 @@ export function calculateSimulation({
     }))
     .filter((expense) => expense.daysRemaining >= 0)
     .sort((left, right) => left.daysRemaining - right.daysRemaining);
+  const upcomingPayments = [...recurringPayments, ...purchasePayments.map((payment) => ({
+    ...payment, daysRemaining: differenceInCalendarDays(payment.dueDate, simulationDate),
+  }))].filter((payment) => payment.daysRemaining >= 0).sort((left, right) => left.daysRemaining - right.daysRemaining);
   const health = calculateFinancialStatus({
     theoreticalReserveCents: reserve.theoreticalReserveCents,
     relevantAvailableBalanceCents,

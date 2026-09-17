@@ -77,6 +77,7 @@ describe('finance recovery route', () => {
       household: { findUnique: vi.fn().mockResolvedValue(household) },
       recurringExpense: { findMany: vi.fn().mockResolvedValue(recurringExpenses) },
       utilityInvoice: { findMany: vi.fn().mockResolvedValue([]) },
+      budgetMarginPreference: { findMany: vi.fn().mockResolvedValue([]) },
       variableExpenseMonth: { findMany: vi.fn().mockResolvedValue([]) },
     };
     const app = express();

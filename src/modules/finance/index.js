@@ -1,6 +1,9 @@
 import express from 'express';
+import { budgetMarginLookup } from './budgetMarginPreference.service.js';
+import { registerBudgetMarginPreferenceRoutes } from './budgetMarginPreferences.js';
 
-import { buildCalendar } from '../../services/calendar.service.js';
+import { buildCalendar, calendarRange } from '../../services/calendar.service.js';
+import { loadPurchaseFinancialSources } from './purchaseFinancialSources.js';
 import { addCalendarMonths, toIsoDate } from '../../services/date.service.js';
 import {
   calculateInvoiceStatistics,
@@ -38,6 +41,7 @@ import {
   prepareMonthSchema,
   recoveryPreviewSchema,
   registerPaymentSchema,
+  recurringIntervalsSchema,
   updateBalanceSchema,
   updateAccountSchema,
   updateInvoiceSchema,
@@ -154,7 +158,7 @@ function canViewExpense(expense, actorUserId, requestedScope) {
 }
 
 const monthBasedFrequency = (frequency) =>
-  !['WEEKLY', 'ONE_TIME'].includes(frequency);
+  !['WEEKLY', 'CUSTOM_WEEKS', 'ONE_TIME'].includes(frequency);
 
 function normalizeNullableFields(body, fields) {
   return fields.reduce((result, field) => {
@@ -176,6 +180,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
       '/households/:householdId/variable-expenses',
       '/households/:householdId/balance',
       '/households/:householdId/budget',
+      '/households/:householdId/budget-margin-preferences',
       '/households/:householdId/dashboard',
       '/households/:householdId/calendar',
       '/households/:householdId/plannings',
@@ -186,6 +191,8 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
     ],
     authenticate,
   );
+
+  registerBudgetMarginPreferenceRoutes({ router, prisma, requireCsrf, memberAccess });
 
   router.get(
     '/households/:householdId/recurring-expenses',
@@ -231,14 +238,13 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
             scope: body.scope,
             frequency: body.frequency,
             intervalMonths: body.frequency === 'CUSTOM_MONTHS' ? body.intervalMonths : null,
+            intervalWeeks: body.intervalWeeks,
             startDate: body.startDate,
             endDate: body.endDate ?? null,
             nextDueDate: body.nextDueDate,
-            usualDayOfMonth:
-              body.usualDayOfMonth ??
-              (monthBasedFrequency(body.frequency)
-                ? body.nextDueDate.getUTCDate()
-                : null),
+            usualDayOfMonth: monthBasedFrequency(body.frequency)
+              ? body.usualDayOfMonth ?? body.nextDueDate.getUTCDate()
+              : null,
             safetyMarginOverrideBps: body.safetyMarginOverrideBps ?? null,
             remindersEnabled: body.remindersEnabled,
             notes: body.notes ?? null,
@@ -276,45 +282,46 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
     asyncRoute(async (request, response) => {
       const { householdId, expenseId } = financeParamsSchema.parse(request.params);
       const body = updateRecurringExpenseSchema.parse(request.body);
-      await memberAccess(prisma, request);
-      const existing = await getRecurringExpense(
-        prisma,
-        householdId,
-        expenseId,
-        request.auth.userId,
-      );
-      const scope = body.scope ?? existing.scope;
-      const personalPersonId = Object.hasOwn(body, 'personalPersonId')
-        ? body.personalPersonId
-        : existing.personalPersonId;
-      const categoryId = body.categoryId ?? existing.categoryId;
-      await requireHouseholdCategory(prisma, { householdId, categoryId });
-      await validateScope(prisma, householdId, scope, personalPersonId);
-      const frequency = body.frequency ?? existing.frequency;
-      const intervalMonths = Object.hasOwn(body, 'intervalMonths')
-        ? body.intervalMonths
-        : existing.intervalMonths;
-      if (frequency === 'CUSTOM_MONTHS' && !intervalMonths) {
-        throw createDomainError(
-          400,
-          'INTERVAL_MONTHS_REQUIRED',
-          'Indica cada cuántos meses se repite el gasto.',
+      const updated = await runSerializableTransaction(prisma, async (database) => {
+        await memberAccess(database, request);
+        const existing = await getRecurringExpense(
+          database,
+          householdId,
+          expenseId,
+          request.auth.userId,
         );
-      }
+        const scope = body.scope ?? existing.scope;
+        const personalPersonId = Object.hasOwn(body, 'personalPersonId')
+          ? body.personalPersonId
+          : existing.personalPersonId;
+        const categoryId = body.categoryId ?? existing.categoryId;
+        await requireHouseholdCategory(database, { householdId, categoryId });
+        await validateScope(database, householdId, scope, personalPersonId);
+        const intervals = recurringIntervalsSchema.parse({
+          frequency: body.frequency ?? existing.frequency,
+          intervalMonths: Object.hasOwn(body, 'intervalMonths') ? body.intervalMonths : existing.intervalMonths,
+          intervalWeeks: Object.hasOwn(body, 'intervalWeeks') ? body.intervalWeeks : existing.intervalWeeks,
+        });
+        const usualDayOfMonth = !monthBasedFrequency(intervals.frequency)
+          ? null
+          : Object.hasOwn(body, 'usualDayOfMonth')
+            ? body.usualDayOfMonth
+            : !monthBasedFrequency(existing.frequency)
+              ? (body.nextDueDate ?? existing.nextDueDate).getUTCDate()
+              : existing.usualDayOfMonth ?? null;
 
-      const updated = await prisma.$transaction(async (database) => {
         const item = await database.recurringExpense.update({
           where: { id: expenseId },
           data: {
             ...body,
             personalPersonId: personalPersonId ?? null,
-            intervalMonths: frequency === 'CUSTOM_MONTHS' ? intervalMonths : null,
+            ...intervals,
             ...normalizeNullableFields(body, [
               'endDate',
-              'usualDayOfMonth',
               'safetyMarginOverrideBps',
               'notes',
             ]),
+            usualDayOfMonth,
           },
           include: { category: true, personalPerson: true },
         });
@@ -362,13 +369,12 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
     asyncRoute(async (request, response) => {
       const { householdId, expenseId } = financeParamsSchema.parse(request.params);
       const body = registerPaymentSchema.parse(request.body);
-      await memberAccess(prisma, request);
       const result = await runSerializableTransaction(prisma, async (database) => {
+        await memberAccess(database, request);
         const expense = await database.recurringExpense.findFirst({
           where: {
             id: expenseId,
             householdId,
-            archivedAt: null,
             ...visibleExpenseWhere(request.auth.userId),
           },
         });
@@ -380,6 +386,35 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
           );
         }
         const dueDate = body.dueDate ?? expense.nextDueDate;
+        // Check an existing occurrence first: a stale tab must receive the same
+        // duplicate conflict after the expense has advanced (or been archived).
+        const existingPayment = await database.expensePayment.findUnique({
+          where: {
+            recurringExpenseId_dueDate: { recurringExpenseId: expense.id, dueDate },
+          },
+          select: { id: true },
+        });
+        if (existingPayment) {
+          throw createDomainError(
+            409,
+            'PAYMENT_ALREADY_REGISTERED',
+            'Ese vencimiento ya tiene un pago registrado.',
+          );
+        }
+        if (expense.isActive === false || expense.archivedAt) {
+          throw createDomainError(
+            404,
+            'RECURRING_EXPENSE_NOT_FOUND',
+            'No se encontró un gasto recurrente activo para ese vencimiento.',
+          );
+        }
+        if (toIsoDate(dueDate) !== toIsoDate(expense.nextDueDate)) {
+          throw createDomainError(
+            409,
+            'PAYMENT_NOT_CURRENT_OCCURRENCE',
+            'Primero registra el vencimiento pendiente anterior.',
+          );
+        }
         const expectedAmountCents = body.expectedAmountCents ?? expense.amountCents;
         const nextAmount =
           body.nextAmountDecision === 'UPDATE_NEXT_AMOUNT'
@@ -419,32 +454,27 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
           }
           throw error;
         }
-        const isCurrentOccurrence =
-          toIsoDate(dueDate) === toIsoDate(expense.nextDueDate);
-        const nextDueDate = isCurrentOccurrence
-          ? calculateNextDueDate(
-              dueDate,
-              expense.frequency,
-              expense.intervalMonths,
-              expense.usualDayOfMonth ??
-                (monthBasedFrequency(expense.frequency)
-                  ? (expense.startDate ?? expense.nextDueDate).getUTCDate()
-                  : null),
-            )
-          : expense.nextDueDate;
-        const updatedExpense = isCurrentOccurrence
-          ? await database.recurringExpense.update({
-              where: { id: expense.id },
-              data: {
-                ...(nextDueDate
-                  ? { nextDueDate }
-                  : { isActive: false, archivedAt: new Date() }),
-                ...(body.nextAmountDecision === 'UPDATE_NEXT_AMOUNT'
-                  ? { amountCents: nextAmount }
-                  : {}),
-              },
-            })
-          : expense;
+        const nextDueDate = calculateNextDueDate(
+          dueDate,
+          expense.frequency,
+          expense.intervalMonths,
+          expense.usualDayOfMonth ??
+            (monthBasedFrequency(expense.frequency)
+              ? (expense.startDate ?? expense.nextDueDate).getUTCDate()
+              : null),
+          expense.intervalWeeks,
+        );
+        const updatedExpense = await database.recurringExpense.update({
+          where: { id: expense.id },
+          data: {
+            ...(nextDueDate
+              ? { nextDueDate }
+              : { isActive: false, archivedAt: new Date() }),
+            ...(body.nextAmountDecision === 'UPDATE_NEXT_AMOUNT'
+              ? { amountCents: nextAmount }
+              : {}),
+          },
+        });
         await createAuditLog(database, {
           actorUserId: request.auth.userId,
           householdId,
@@ -483,10 +513,9 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
     asyncRoute(async (request, response) => {
       const { householdId, expenseId, paymentId } = financeParamsSchema.parse(request.params);
       const body = editPaymentSchema.parse(request.body);
-      await memberAccess(prisma, request);
-      await getRecurringExpense(prisma, householdId, expenseId, request.auth.userId);
-
-      const payment = await prisma.$transaction(async (database) => {
+      const payment = await runSerializableTransaction(prisma, async (database) => {
+        await memberAccess(database, request);
+        await getRecurringExpense(database, householdId, expenseId, request.auth.userId);
         const existing = await database.expensePayment.findFirst({
           where: { id: paymentId, recurringExpenseId: expenseId },
         });
@@ -498,6 +527,14 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
           );
         }
 
+        // The database requires UPDATE_NEXT_AMOUNT to match a PAID amount.
+        // A historical correction cannot apply a new decision to the expense:
+        // clear only incompatible payment metadata and retain its origin in
+        // the audit trail, leaving the future amount and recurrence untouched.
+        const clearPreviousAmountDecision =
+          existing.nextAmountDecision === 'UPDATE_NEXT_AMOUNT' &&
+          (body.status !== 'PAID' ||
+            body.actualAmountCents !== existing.nextExpectedAmountCents);
         const updated = await database.expensePayment.update({
           where: { id: paymentId },
           data: {
@@ -505,6 +542,9 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
             actualAmountCents: body.status === 'PAID' ? body.actualAmountCents : null,
             paymentDate: body.status === 'PAID' ? body.paymentDate : null,
             ...(Object.hasOwn(body, 'notes') ? { notes: body.notes ?? null } : {}),
+            ...(clearPreviousAmountDecision
+              ? { nextAmountDecision: 'KEEP_PREVIOUS', nextExpectedAmountCents: null }
+              : {}),
           },
         });
         await createAuditLog(database, {
@@ -518,6 +558,13 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
             previousStatus: existing.status,
             status: updated.status,
             historicalPaymentCorrection: true,
+            ...(clearPreviousAmountDecision
+              ? {
+                  previousNextAmountDecision: existing.nextAmountDecision,
+                  previousNextExpectedAmountCents: existing.nextExpectedAmountCents,
+                  amountDecisionClearedByHistoricalCorrection: true,
+                }
+              : {}),
           },
         });
         return updated;
@@ -615,6 +662,9 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
         current.push(invoice);
         groups.set(key, current);
       });
+      const appliesMargin = budgetMarginLookup(await prisma.budgetMarginPreference.findMany({
+        where: { householdId, expenseType: 'INVOICE', ...visibleExpenseWhere(request.auth.userId, query.scope) },
+      }));
       const statistics = [...groups.values()].map((items) => ({
         categoryId: items[0].categoryId,
         category: items[0].category,
@@ -622,6 +672,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
         personalPersonId: items[0].personalPersonId,
         personalPerson: items[0].personalPerson,
         ...calculateInvoiceStatistics(items, {
+          applySafetyMargin: appliesMargin('INVOICE', items[0]),
           householdMarginBps: household.safetyMarginBps,
           categoryMarginBps: items[0].category.safetyMarginBps,
         }),
@@ -752,6 +803,13 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
             },
           },
         });
+        // PostgreSQL rejects SUMMARY while detail entries still exist. Remove
+        // the replaced details before changing mode, in this same transaction.
+        if (existing && (body.entryMode === 'SUMMARY' || body.entries)) {
+          await database.variableExpenseEntry.deleteMany({
+            where: { variableExpenseMonthId: existing.id },
+          });
+        }
         const month = existing
           ? await database.variableExpenseMonth.update({
               where: { id: existing.id },
@@ -781,11 +839,6 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
                 notes: body.notes ?? null,
               },
             });
-        if (body.entryMode === 'SUMMARY' || body.entries) {
-          await database.variableExpenseEntry.deleteMany({
-            where: { variableExpenseMonthId: month.id },
-          });
-        }
         if (body.entryMode === 'DETAIL' && body.entries?.length) {
           await database.variableExpenseEntry.createMany({
             data: body.entries.map((entry) => ({
@@ -827,7 +880,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
           ...(query.categoryId ? { categoryId: query.categoryId } : {}),
           ...(query.ownerKey ? { ownerKey: query.ownerKey } : {}),
         },
-        include: { category: true, entries: true },
+        include: { category: true, entries: true, personalPerson: { select: { id: true, name: true } } },
       });
       const groups = new Map();
       months.forEach((month) => {
@@ -836,13 +889,18 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
         current.push(month);
         groups.set(key, current);
       });
+      const appliesMargin = budgetMarginLookup(await prisma.budgetMarginPreference.findMany({
+        where: { householdId, expenseType: 'VARIABLE', ...visibleExpenseWhere(request.auth.userId) },
+      }));
       const statistics = [...groups.values()].map((items) => ({
         categoryId: items[0].categoryId,
         ownerKey: items[0].ownerKey,
         scope: items[0].scope,
         personalPersonId: items[0].personalPersonId,
+        personalPerson: items[0].personalPerson,
         category: items[0].category,
         ...calculateVariableStatistics(items, {
+          applySafetyMargin: appliesMargin('VARIABLE', items[0]),
           calculationDate: dateOrToday(),
           householdMarginBps: household.safetyMarginBps,
           categoryMarginBps: items[0].category.safetyMarginBps,
@@ -1192,53 +1250,58 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
       const { householdId } = financeParamsSchema.parse(request.params);
       const body = prepareMonthSchema.parse(request.body);
       await memberAccess(prisma, request);
-      const dashboard = await calculateDashboard(
-        prisma,
-        householdId,
-        body.calculationDate,
-        body.confirmedBalanceCents,
-        undefined,
-      );
-      if (!dashboard.budget.readiness.ready) {
-        throw createDomainError(
-          409,
-          'BUDGET_NOT_READY',
-          'Completa las personas y su reparto antes de preparar el mes.',
-          dashboard.budget.readiness,
-        );
-      }
-      const activePersonIds = new Set(
-        dashboard.budget.contributions.map((contribution) => contribution.personId),
-      );
-      const confirmedPersonalBalances = new Map(
-        body.confirmedPersonalBalances.map((item) => [item.personId, item.balanceCents]),
-      );
-      if (
-        confirmedPersonalBalances.size !== body.confirmedPersonalBalances.length ||
-        confirmedPersonalBalances.size !== activePersonIds.size ||
-        [...confirmedPersonalBalances.keys()].some((personId) => !activePersonIds.has(personId))
-      ) {
-        throw createDomainError(
-          400,
-          'PERSONAL_BALANCES_REQUIRED',
-          'Confirma el saldo personal de cada persona activa.',
-        );
-      }
-      const date = body.calculationDate;
-      const year = date.getUTCFullYear();
-      const month = date.getUTCMonth() + 1;
-      const temporaryAdjustments = dashboard.activeRecoveryPlan
-        ? new Map(
-            distributeTemporaryAdjustment(
-              dashboard.activeRecoveryPlan.monthlyAdjustmentCents,
-              dashboard.budget.contributions.map((contribution) => ({
-                id: contribution.personId,
-                contributionBps: contribution.contributionBps,
-              })),
-            ).map((item) => [item.personId, item.temporaryAdjustmentCents]),
-          )
-        : new Map();
       const result = await runSerializableTransaction(prisma, async (database) => {
+        await memberAccess(database, request);
+        const dashboard = await calculateDashboard(
+          database,
+          householdId,
+          body.calculationDate,
+          body.confirmedBalanceCents,
+          undefined,
+        );
+        if (!dashboard.budget.readiness.ready) {
+          throw createDomainError(
+            409,
+            'BUDGET_NOT_READY',
+            'Completa las personas y su reparto antes de preparar el mes.',
+            dashboard.budget.readiness,
+          );
+        }
+        const activePersonIds = new Set(
+          dashboard.budget.contributions.map((contribution) => contribution.personId),
+        );
+        const confirmedPersonalBalances = new Map(
+          body.confirmedPersonalBalances.map((item) => [item.personId, item.balanceCents]),
+        );
+        if (
+          confirmedPersonalBalances.size !== body.confirmedPersonalBalances.length ||
+          confirmedPersonalBalances.size !== activePersonIds.size ||
+          [...confirmedPersonalBalances.keys()].some((personId) => !activePersonIds.has(personId))
+        ) {
+          throw createDomainError(
+            400,
+            'PERSONAL_BALANCES_REQUIRED',
+            'Confirma el saldo personal de cada persona activa.',
+          );
+        }
+        const date = body.calculationDate;
+        const year = date.getUTCFullYear();
+        const month = date.getUTCMonth() + 1;
+        const temporaryAdjustments = dashboard.activeRecoveryPlan
+          ? new Map(
+              distributeTemporaryAdjustment(
+                dashboard.activeRecoveryPlan.monthlyAdjustmentCents,
+                dashboard.budget.contributions.map((contribution) => ({
+                  id: contribution.personId,
+                  contributionBps: contribution.contributionBps,
+                })),
+              ).map((item) => [item.personId, item.temporaryAdjustmentCents]),
+            )
+          : new Map();
+        const people = await database.householdPerson.findMany({
+          where: { householdId, isActive: true, archivedAt: null },
+          select: { id: true, linkedUserId: true },
+        });
         const previous = await database.monthlyPlanning.findUnique({
           where: { householdId_year_month: { householdId, year, month } },
         });
@@ -1265,6 +1328,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
           financialStatus: dashboard.financialStatus,
           calculationVersion: dashboard.budget.calculationVersion,
           breakdown: jsonValue({
+            personIdentitySnapshot: people.map((person) => ({ personId: person.id, linkedUserId: person.linkedUserId })),
             budget: dashboard.budget,
             reserveLines: dashboard.reserveLines,
             upcomingPayments: dashboard.upcomingPayments,
@@ -1400,7 +1464,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
       const preview = previewRecoveryPlan({
         ...body,
         startsOn,
-        upcomingPayments: upcomingPayments(inputs.recurringExpenses, startsOn),
+        upcomingPayments: upcomingPayments(inputs.recurringExpenses, startsOn, inputs.purchaseSources),
         relevantAvailableBalanceCents: availableCommonBalance(inputs),
         standardMonthlyBudgetCents: budget.householdBudgetCents,
       });
@@ -1441,7 +1505,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
       const preview = previewRecoveryPlan({
         ...body,
         startsOn,
-        upcomingPayments: upcomingPayments(inputs.recurringExpenses, startsOn),
+        upcomingPayments: upcomingPayments(inputs.recurringExpenses, startsOn, inputs.purchaseSources),
         relevantAvailableBalanceCents: availableCommonBalance(inputs),
         standardMonthlyBudgetCents: budget.householdBudgetCents,
       });
@@ -1569,9 +1633,15 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
           },
         },
       });
+      const { rangeStart, rangeEnd } = calendarRange({ view: query.view, anchorDate });
+      const purchaseSources = await loadPurchaseFinancialSources(prisma, {
+        householdId, actorUserId: request.auth.userId, from: rangeStart, to: rangeEnd,
+      });
       return sendSuccess(
         response,
-        buildCalendar({ recurringExpenses: expenses, payments, today, view: query.view, anchorDate }),
+        buildCalendar({ recurringExpenses: expenses, payments,
+          purchaseSources: purchaseSources.filter((source) => !query.scope || source.scope === query.scope),
+          today, view: query.view, anchorDate }),
       );
     }),
   );

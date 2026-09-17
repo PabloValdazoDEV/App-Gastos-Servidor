@@ -35,6 +35,12 @@ const createPaymentFixture = () => {
     isActive: true,
   };
   const database = {
+    householdUserAccess: {
+      findFirst: vi.fn().mockResolvedValue({
+        role: 'MEMBER',
+        household: { id: householdId, isActive: true, ownerUserId: null },
+      }),
+    },
     recurringExpense: {
       findFirst: vi.fn().mockResolvedValue(recurringExpense),
       update: vi.fn().mockImplementation(({ data }) =>
@@ -42,6 +48,7 @@ const createPaymentFixture = () => {
       ),
     },
     expensePayment: {
+      findUnique: vi.fn().mockResolvedValue(null),
       create: vi.fn().mockImplementation(({ data }) =>
         Promise.resolve({ id: crypto.randomUUID(), ...data }),
       ),

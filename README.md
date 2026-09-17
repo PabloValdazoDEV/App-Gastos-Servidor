@@ -47,6 +47,26 @@ Seed local opcional:
 npm run seed
 ```
 
+## Configuración de OpenAI
+
+El análisis opcional de tickets/facturas usa el SDK oficial `openai` **solo en el servidor**, con Responses API y un JSON Schema estricto. Configura en el entorno del backend:
+
+```dotenv
+OPENAI_API_KEY=
+OPENAI_RECEIPT_MODEL=gpt-5.6-luna
+AI_ANALYSIS_LIMIT_PER_HOUR=10
+OPENAI_RECEIPT_TIMEOUT_MS=60000
+OPENAI_RECEIPT_MAX_OUTPUT_TOKENS=8192
+```
+
+Introduce la clave únicamente en el servidor, nunca en Git, ejemplos, logs ni variables `VITE_*`. Sin clave, la aplicación normal arranca y la acción de análisis responde `AI_NOT_CONFIGURED`. El modelo se configura en un solo lugar; no existe fallback automático a modelos más caros.
+
+Los bytes privados JPEG/PNG/WebP se envían como `input_image` Base64 y los PDF como `input_file` Base64, sin URL pública ni subida a Files/Vector Stores. Cada llamada fija `store:false`, sin herramientas, sin reintentos automáticos y con timeout total (entre 1 y 120 segundos). El límite de salida admite entre 1024 y 16384 tokens; el límite local por usuario es configurable. No se registran contenido, Base64, cabeceras ni errores internos del proveedor.
+
+La salida se valida de nuevo (fechas reales, moneda, enteros, productos e incoherencias de importes), conserva `null` en lo desconocido y siempre requiere revisión. Analizar solo genera un borrador: aplicar los datos exige confirmación explícita y mantiene las restricciones financieras existentes. Los tests usan mocks y no realizan llamadas de pago. `store:false` desactiva el almacenamiento de Responses, pero no constituye por sí solo una garantía de retención cero del proveedor; revisa sus [controles de datos](https://developers.openai.com/api/docs/guides/your-data) antes de producción.
+
+Referencias oficiales: [modelo](https://developers.openai.com/api/docs/models/gpt-5.6-luna), [Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs), [imágenes](https://developers.openai.com/api/docs/guides/images-vision), [archivos](https://developers.openai.com/api/docs/guides/file-inputs).
+
 ## Scripts
 
 ```bash
