@@ -65,7 +65,7 @@ export const createApp = ({
     // File uploads must authenticate, authorize the purchase and reject an
     // unsupported MIME before consuming bytes, including disguised JSON/form.
     const rawPurchaseUpload = request.method === 'POST'
-      && /^\/api\/households\/[^/]+\/purchases\/[^/]+\/documents\/?$/i.test(request.path);
+      && /^\/api\/households\/[^/]+\/(?:purchases\/[^/]+\/documents|purchase-drafts)\/?$/i.test(request.path);
     if (rawPurchaseUpload) return next();
     return parseJson(request, response, (error) => {
       if (error) return next(error);

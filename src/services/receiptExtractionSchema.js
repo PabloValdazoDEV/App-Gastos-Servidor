@@ -4,9 +4,19 @@ import { zodTextFormat } from 'openai/helpers/zod';
 const confidence = z.enum(['HIGH', 'MEDIUM', 'LOW']);
 const cents = z.number().int().min(0).max(2_147_483_647).nullable();
 const text = (max) => z.string().min(1).max(max).nullable();
+const documentWarranty = z.object({
+  durationMonths: z.number().int().min(1).max(1200).nullable(),
+  endsAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
+}).strict().nullable();
+const receiptItemSchema = z.object({
+  name: text(200), quantity: z.number().int().min(1).max(10_000).nullable(),
+  unitPriceCents: cents, totalPriceCents: cents,
+  brand: text(120), model: text(120), confidence, warranty: documentWarranty,
+}).strict();
 
 // Every field is required, but unknown values are explicitly null. Strict
-// objects exclude ownership, payment/financing, warranty and all other decisions.
+// objects exclude ownership and payment/financing decisions. Warranty is only
+// documentary evidence, never an inferred legal/manufacturer entitlement.
 export const receiptExtractionSchema = z.object({
   documentType: z.enum(['RECEIPT', 'INVOICE', 'UNKNOWN']),
   merchant: z.object({ name: text(200), confidence }).strict(),
@@ -17,17 +27,18 @@ export const receiptExtractionSchema = z.object({
   discountCents: cents,
   totalCents: cents,
   documentNumber: text(200),
-  items: z.array(z.object({
-    name: text(200), quantity: z.number().int().min(1).max(10_000).nullable(),
-    unitPriceCents: cents, totalPriceCents: cents,
-    brand: text(120), model: text(120), confidence,
-  }).strict()).max(50),
+  items: z.array(receiptItemSchema).max(50),
   needsReview: z.boolean(),
   warnings: z.array(z.string().min(1).max(300)).max(20),
 }).strict();
 
 export const receiptExtractionFormat = zodTextFormat(receiptExtractionSchema, 'purchase_receipt_extraction');
 export const receiptExtractionJsonSchema = receiptExtractionFormat.schema;
+// Stored analyses from earlier versions lack warranty. Keep their original
+// shape and nulls while requiring the field in every new provider response.
+const persistedExtractionSchema = receiptExtractionSchema.extend({
+  items: z.array(receiptItemSchema.extend({ warranty: documentWarranty.optional() })).max(50),
+});
 const currencyCodes = new Set(Intl.supportedValuesOf('currency'));
 
 export class ReceiptExtractionValidationError extends Error {
@@ -47,9 +58,12 @@ function validDate(value) {
 /** Deterministic post-validation. Never invent a missing price, quantity, date,
  * currency or merchant; warnings inform review and never mutate financial data. */
 export function validateReceiptExtraction(value) {
-  const result = receiptExtractionSchema.safeParse(value);
+  const result = persistedExtractionSchema.safeParse(value);
   if (!result.success) throw new ReceiptExtractionValidationError();
   const data = result.data;
+  if (data.items.some(({ warranty }) => warranty && (
+    !validDate(warranty.endsAt) || (warranty.endsAt === null && warranty.durationMonths === null)
+  ))) throw new ReceiptExtractionValidationError();
   if (!validDate(data.purchaseDate.value) || (data.currency !== null && !currencyCodes.has(data.currency))) {
     throw new ReceiptExtractionValidationError();
   }

@@ -5,6 +5,8 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { analysisTestApp, makeReceiptAnalyzer, receiptData, receiptResult, reviewedBody } from './helpers/purchaseAnalysisFixtures.js';
 import { authenticated as auth, mutable as write, documentBodies, upload } from './helpers/purchaseDocumentsFixtures.js';
 import { financingInput } from './helpers/purchasePaymentsFixtures.js';
+import { buildPurchaseFinancialSources } from '../src/modules/finance/purchaseFinancialSources.js';
+import { postgresPurchaseDocumentStorage } from '../src/modules/purchases/documentStorage.js';
 
 const enabled = process.env.PURCHASE_ANALYSIS_DB_TEST === '1';
 const database = enabled ? new PrismaClient() : null;
@@ -60,6 +62,140 @@ async function fixture(operation) {
 }
 
 afterAll(async () => database?.$disconnect());
+
+const draftBase = (ctx) => `/api/households/${ctx.household.id}/purchase-drafts`;
+const draftInput = (purchase = {}) => ({ currency: 'EUR', analysisId: null, purchase: {
+  merchant: 'Tienda revisada', purchaseDate: '2026-09-17', totalCents: 120000,
+  paymentMethod: 'UPFRONT', paymentDate: '2026-09-17', paidAmountCents: 120000,
+  items: [{ name: 'Un solo producto', quantity: 1, priceCents: 120000 }], ...purchase,
+} });
+const addDraft = async (ctx, actor = ctx.userIds[0]) => (await write(request(ctx.app).post(draftBase(ctx)), actor)
+  .set('Content-Type', 'application/pdf').set('X-Document-Filename', encodeURIComponent('ticket privado.pdf')).send(documentBodies.pdf).expect(201)).body.data;
+const confirmDraft = (ctx, draft, body = draftInput(), app = ctx.app) => write(request(app).post(`${draftBase(ctx)}/${draft.id}/confirm`), ctx.userIds[0]).send(body);
+
+describe.skipIf(!enabled)('private purchase intake before a purchase exists', () => {
+  it('stores reviewed units, receipt date and warranty while preserving the documentary extraction', async () => fixture(async (tx, ctx) => {
+    const source = { ...receiptData, purchaseDate: { value: '2024-02-29', confidence: 'HIGH' }, totalCents: 1100, items: [
+      { ...receiptData.items[0], quantity: 2, totalPriceCents: 1100, warranty: { durationMonths: 24, endsAt: null } },
+    ] };
+    ctx.analyzer.analyze.mockResolvedValueOnce({ ...receiptResult, extractedData: source });
+    const draft = await addDraft(ctx);
+    const analysis = (await write(request(ctx.app).post(`${draftBase(ctx)}/${draft.id}/analyze`), ctx.userIds[0]).send({ consent: true }).expect(201)).body.data;
+    expect(analysis.extractedData.items[0]).toMatchObject({ quantity: 2, warranty: { durationMonths: 24, endsAt: null } });
+    const body = { ...draftInput({ purchaseDate: '2024-02-29', paymentDate: '2024-02-29', totalCents: 1100, paidAmountCents: 1100, items: [{ name: 'Producto revisado', quantity: 2, warrantyDurationMonths: 36 }] }), analysisId: analysis.id };
+    const saved = (await confirmDraft(ctx, draft, body).expect(201)).body.data;
+    expect(saved).toMatchObject({ purchaseDate: '2024-02-29', items: [{ quantity: 2, warrantyDurationMonths: 36, warrantyEndsAt: '2027-02-28', warrantySource: 'DURATION' }] });
+    const history = await tx.purchaseDocumentAnalysis.findUnique({ where: { id: analysis.id } });
+    expect(history.extractedData.items[0].warranty.durationMonths).toBe(24);
+    expect(history.reviewedData.items[0].warrantyDurationMonths).toBe(36);
+  }));
+  it('uploads and analyzes privately without creating a purchase or expense', async () => fixture(async (tx, ctx) => {
+    const draft = await addDraft(ctx);
+    expect(draft).toMatchObject({ filename: 'ticket privado.pdf', contentType: 'application/pdf' });
+    expect(draft).not.toHaveProperty('content');
+    expect((await auth(request(ctx.app).get(draftBase(ctx)), ctx.userIds[0]).expect(200)).body.data).toHaveLength(1);
+    expect((await auth(request(ctx.app).get(draftBase(ctx)), ctx.userIds[1]).expect(200)).body.data).toEqual([]);
+    const analyzed = await write(request(ctx.app).post(`${draftBase(ctx)}/${draft.id}/analyze`), ctx.userIds[0]).send({ consent: true }).expect(201);
+    expect(analyzed.body.data).toMatchObject({ status: 'COMPLETED', extractedData: receiptData, totalTokens: 150 });
+    expect(await tx.purchase.count({ where: { householdId: ctx.household.id } })).toBe(1);
+    expect(await tx.oneTimeExpense.count({ where: { householdId: ctx.household.id } })).toBe(0);
+    expect(Buffer.from((await tx.purchaseDraft.findUnique({ where: { id: draft.id } })).content)).toEqual(documentBodies.pdf);
+  }));
+  it('enforces authentication, CSRF, owner-only access, consent and file signatures', async () => fixture(async (tx, ctx) => {
+    const draft = await addDraft(ctx, ctx.userIds[1]);
+    await request(ctx.app).get(draftBase(ctx)).expect(401);
+    await auth(request(ctx.app).delete(`${draftBase(ctx)}/${draft.id}`), ctx.userIds[1]).expect(403);
+    await auth(request(ctx.app).get(`${draftBase(ctx)}/${draft.id}`), ctx.userIds[0]).expect(404);
+    await write(request(ctx.app).post(`${draftBase(ctx)}/${draft.id}/analyze`), ctx.userIds[1]).send({ consent: false }).expect(400);
+    await write(request(ctx.app).post(draftBase(ctx)), ctx.userIds[1]).set('Content-Type', 'image/png').set('X-Document-Filename', 'falso.png').send(documentBodies.pdf).expect(415);
+    expect(ctx.analyzer.analyze).not.toHaveBeenCalled();
+    expect(await tx.purchaseDraft.count({ where: { householdId: ctx.household.id } })).toBe(1);
+  }));
+  it('saves edited values, original bytes and analysis history atomically and is idempotent', async () => fixture(async (tx, ctx) => {
+    const draft = await addDraft(ctx);
+    const analysis = (await write(request(ctx.app).post(`${draftBase(ctx)}/${draft.id}/analyze`), ctx.userIds[0]).send({ consent: true }).expect(201)).body.data;
+    const body = { ...draftInput({ totalCents: 320, paidAmountCents: 320, items: [{ name: 'Producto B revisado', quantity: 1, priceCents: 320 }] }), analysisId: analysis.id };
+    const created = (await confirmDraft(ctx, draft, body).expect(201)).body.data;
+    expect(created).toMatchObject({ merchant: 'Tienda revisada', totalCents: 320, paidAmountCents: 320 });
+    expect(created.items).toHaveLength(1);
+    const document = await tx.purchaseDocument.findFirst({ where: { purchaseId: created.id }, include: { analyses: true } });
+    expect(document.analyses[0]).toMatchObject({ status: 'CONFIRMED', extractedData: receiptData, reviewedData: { items: [{ name: 'Producto B revisado' }] } });
+    expect(Buffer.from((await tx.purchaseDocumentContent.findUnique({ where: { documentId: document.id } })).content)).toEqual(documentBodies.pdf);
+    expect((await tx.purchaseDraft.findUnique({ where: { id: draft.id } })).content).toBeNull();
+    expect((await confirmDraft(ctx, draft, body).expect(201)).body.data.id).toBe(created.id);
+    await confirmDraft(ctx, draft, { ...body, purchase: { ...body.purchase, merchant: 'Otro intento' } }).expect(409);
+    await write(request(ctx.app).delete(`${draftBase(ctx)}/${draft.id}`), ctx.userIds[0]).expect(409);
+    expect(await tx.purchase.count({ where: { householdId: ctx.household.id } })).toBe(2);
+    expect(await tx.oneTimeExpense.count({ where: { householdId: ctx.household.id } })).toBe(0);
+  }));
+  it('rolls the whole confirmation back when private storage fails, retaining the draft for retry', async () => fixture(async (tx, ctx) => {
+    const draft = await addDraft(ctx);
+    const failing = analysisTestApp(ctx.adapter, { documentStorage: { ...postgresPurchaseDocumentStorage, save: async () => { throw new Error('private content must not leak'); } } });
+    const failure = await confirmDraft(ctx, draft, draftInput(), failing).expect(503);
+    expect(JSON.stringify(failure.body)).not.toContain('private content');
+    expect(await tx.purchase.count({ where: { householdId: ctx.household.id } })).toBe(1);
+    expect((await tx.purchaseDraft.findUnique({ where: { id: draft.id } })).confirmedPurchaseId).toBeNull();
+    await confirmDraft(ctx, draft).expect(201);
+  }));
+  it('rejects multiple products, wrong currency and an analysis from another draft', async () => fixture(async (tx, ctx) => {
+    const draft = await addDraft(ctx);
+    await confirmDraft(ctx, draft, draftInput({ items: [{ name: 'A' }, { name: 'B' }] })).expect(400);
+    await confirmDraft(ctx, draft, { ...draftInput(), currency: 'USD' }).expect(400);
+    await confirmDraft(ctx, draft, { ...draftInput(), analysisId: crypto.randomUUID() }).expect(400);
+    expect(await tx.purchase.count({ where: { householdId: ctx.household.id } })).toBe(1);
+  }));
+  it('keeps a safe failed analysis and permits manual confirmation without provider success', async () => fixture(async (tx, ctx) => {
+    const draft = await addDraft(ctx);
+    ctx.analyzer.analyze.mockRejectedValueOnce(new Error('secret provider response'));
+    const response = await write(request(ctx.app).post(`${draftBase(ctx)}/${draft.id}/analyze`), ctx.userIds[0]).send({ consent: true }).expect(502);
+    expect(JSON.stringify(response.body)).not.toContain('secret');
+    const created = (await confirmDraft(ctx, draft).expect(201)).body.data;
+    const analyses = await tx.purchaseDocumentAnalysis.findMany({ where: { document: { purchaseId: created.id } } });
+    expect(analyses[0]).toMatchObject({ status: 'FAILED', failureCode: 'AI_PROVIDER_ERROR', extractedData: null });
+  }));
+  it('rejects expired drafts and deletes only an explicitly selected unconfirmed draft', async () => fixture(async (tx, ctx) => {
+    const expired = await addDraft(ctx);
+    await tx.purchaseDraft.update({ where: { id: expired.id }, data: { expiresAt: new Date('2020-01-01') } });
+    await confirmDraft(ctx, expired).expect(404);
+    const active = await addDraft(ctx);
+    expect(await tx.purchaseDraft.findUnique({ where: { id: expired.id } })).toBeNull();
+    await write(request(ctx.app).delete(`${draftBase(ctx)}/${active.id}`), ctx.userIds[0]).expect(200);
+    expect(await tx.purchase.count({ where: { householdId: ctx.household.id } })).toBe(1);
+  }));
+  it('creates finite financing and entry sources exactly once with rounding and no shadow expenses', async () => fixture(async (tx, ctx) => {
+    const draft = await addDraft(ctx);
+    const body = draftInput({ paymentMethod: 'FINANCED', paymentDate: null, paidAmountCents: null, financing: { ...financingInput, installmentCount: 3, installmentAmountCents: 33334, financingTotalCents: 100001, firstInstallmentDate: '2027-01-31' } });
+    const created = (await confirmDraft(ctx, draft, body).expect(201)).body.data;
+    expect(created.financing.installments.map((item) => [item.dueDate, item.expectedAmountCents, item.status])).toEqual([
+      ['2027-01-31', 33334, 'PLANNED'], ['2027-02-28', 33334, 'PLANNED'], ['2027-03-31', 33333, 'PLANNED'],
+    ]);
+    const sources = buildPurchaseFinancialSources([created], { from: '2026-01-01', to: '2028-01-01' });
+    expect(sources).toHaveLength(4);
+    expect(sources.reduce((sum, item) => sum + item.expectedAmountCents, 0)).toBe(120001);
+    expect(sources.every((item) => item.actualAmountCents === null)).toBe(true);
+    expect(await tx.oneTimeExpense.count({ where: { householdId: ctx.household.id } })).toBe(0);
+    expect(await tx.recurringExpense.count({ where: { householdId: ctx.household.id } })).toBe(0);
+    expect((await tx.household.findUnique({ where: { id: ctx.household.id } })).currentBalanceCents).toBe(50000);
+  }));
+  it('keeps a single product after creation and synchronizes its price when edited', async () => fixture(async (tx, ctx) => {
+    const draft = await addDraft(ctx);
+    const created = (await confirmDraft(ctx, draft).expect(201)).body.data;
+    expect(created.singleProduct).toBe(true);
+    await write(request(ctx.app).post(`${ctx.base}/${created.id}/items`), ctx.userIds[0]).send({ name: 'Otro' }).expect(400);
+    const updated = (await write(request(ctx.app).patch(`${ctx.base}/${created.id}`), ctx.userIds[0]).send({ totalCents: 100000 }).expect(200)).body.data;
+    expect(updated.items[0].priceCents).toBe(100000);
+    expect(updated.paidAmountCents).toBe(120000); // Editing a price never rewrites actual payment evidence.
+    await write(request(ctx.app).post(ctx.base), ctx.userIds[0]).send({ ...draftInput().purchase, singleProduct: true, items: [{ name: 'A' }, { name: 'B' }] }).expect(400);
+  }));
+  it('shares the provider rate limit between saved documents and intake drafts', async () => fixture(async (tx, ctx) => {
+    const draft = await addDraft(ctx);
+    const limited = analysisTestApp(ctx.adapter, { receiptAnalyzer: ctx.analyzer, aiConfig: { analysisLimitPerHour: 1 } });
+    await ctx.analyze(ctx.purchase, ctx.document, ctx.userIds[0], limited);
+    await write(request(limited).post(`${draftBase(ctx)}/${draft.id}/analyze`), ctx.userIds[0]).send({ consent: true }).expect(429);
+    expect(ctx.analyzer.analyze).toHaveBeenCalledOnce();
+    expect(await tx.purchaseDraftAnalysis.count({ where: { draftId: draft.id } })).toBe(0);
+  }));
+});
 
 describe.skipIf(!enabled)('purchase analysis PostgreSQL atomic domain integration', () => {
   it('analyzes without automatically changing purchase, products, guarantees, bytes or balances', async () => fixture(async (tx, ctx) => {

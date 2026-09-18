@@ -154,6 +154,9 @@ export async function confirmPurchaseDocumentAnalysis(prisma, context, input) {
       && reviewed.currency !== household.currency) {
       throw error(400, 'AI_CURRENCY_MISMATCH', 'Comprueba la moneda. Los importes aplicados deben estar en la moneda del hogar; no se convierten automáticamente.');
     }
+    if (input.apply.items === 'ADD' && purchase.singleProduct) {
+      throw error(400, 'PURCHASE_SINGLE_PRODUCT', 'Esta compra corresponde a un producto. Crea otra compra para añadir un producto distinto.');
+    }
     if (input.apply.items === 'ADD' && purchase.items.length + reviewed.items.length > 50) {
       throw error(400, 'PURCHASE_ITEMS_LIMIT', 'Una compra admite como máximo 50 productos, incluidos los existentes.');
     }

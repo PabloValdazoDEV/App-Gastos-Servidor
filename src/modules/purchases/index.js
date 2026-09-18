@@ -7,11 +7,16 @@ import { archivePurchase, createPurchase, getPurchase, listPurchases, mutatePurc
 import { registerPurchaseDocumentRoutes } from './purchaseDocuments.js';
 import { installmentPaymentSchema, revertInstallmentPaymentSchema } from './paymentSchemas.js';
 import { mutatePurchaseInstallmentPayment } from './purchasePayments.service.js';
-import { registerPurchaseAnalysisRoutes } from './purchaseAnalysis.js';
+import { createPurchaseAnalysisRateLimiter, registerPurchaseAnalysisRoutes } from './purchaseAnalysis.js';
+import { registerPurchaseDraftRoutes } from './purchaseDrafts.js';
+import { createOpenAIReceiptAnalyzer } from '../../services/receiptAnalyzer.js';
 
 export function createPurchasesRouter({ prisma, authenticate, requireCsrf, documentStorage, receiptAnalyzer, aiConfig }) {
   if (!prisma || !authenticate || !requireCsrf) throw new TypeError('createPurchasesRouter requiere prisma, authenticate y requireCsrf.');
   const router = express.Router();
+  const analyzer = receiptAnalyzer ?? createOpenAIReceiptAnalyzer({ config: aiConfig });
+  const analysisLimiter = createPurchaseAnalysisRateLimiter({ max: aiConfig?.analysisLimitPerHour });
+  registerPurchaseDraftRoutes({ router, prisma, authenticate, requireCsrf, documentStorage, analyzer, limiter: analysisLimiter });
   const base = '/households/:householdId/purchases';
   const context = (request) => ({ ...purchaseParamsSchema.parse(request.params), userId: getAuthenticatedUserId(request) });
   router.use(base, authenticate);
@@ -24,7 +29,7 @@ export function createPurchasesRouter({ prisma, authenticate, requireCsrf, docum
   router.patch(`${base}/:purchaseId/items/:itemId`, requireCsrf, asyncRoute(async (req, res) => sendSuccess(res, await mutatePurchaseItem(prisma, context(req), 'update', updatePurchaseItemSchema.parse(req.body)))));
   router.delete(`${base}/:purchaseId/items/:itemId`, requireCsrf, asyncRoute(async (req, res) => sendSuccess(res, await mutatePurchaseItem(prisma, context(req), 'delete'))));
   registerPurchaseDocumentRoutes({ router, prisma, requireCsrf, documentStorage });
-  registerPurchaseAnalysisRoutes({ router, prisma, requireCsrf, documentStorage, receiptAnalyzer, aiConfig });
+  registerPurchaseAnalysisRoutes({ router, prisma, requireCsrf, documentStorage, receiptAnalyzer: analyzer, aiConfig, analysisLimiter });
   const installmentPath = `${base}/:purchaseId/installments/:installmentId`;
   router.post(`${installmentPath}/pay`, requireCsrf, asyncRoute(async (req, res) => sendSuccess(res,
     await mutatePurchaseInstallmentPayment(prisma, context(req), 'pay', installmentPaymentSchema.parse(req.body)))));

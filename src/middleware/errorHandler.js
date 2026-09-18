@@ -64,7 +64,7 @@ export const createErrorHandler = ({ logger, nodeEnv }) =>
     // JSON parsing happens before the document router's safe error boundary.
     // Never log parser/ORM/provider messages that may include a private receipt,
     // even while developing. IDs, status and the safe error code suffice.
-    const privateDocumentRequest = /\/purchases\/[^/]+\/documents(?:\/|$)/.test(request.path ?? '');
+    const privateDocumentRequest = /\/(?:purchases\/[^/]+\/documents|purchase-drafts)(?:\/|$)/.test(request.path ?? '');
     if (nodeEnv !== 'production' && !error?.isOperational && !privateDocumentRequest) {
       logData.errorName = error?.name ?? 'Error';
       logData.errorMessage = error?.message ?? String(error);

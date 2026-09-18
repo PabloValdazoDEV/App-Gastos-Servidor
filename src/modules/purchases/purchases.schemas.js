@@ -71,8 +71,10 @@ export const ownershipSchema = z.object({
 }).superRefine(validatePurchaseOwnership);
 export const createPurchaseSchema = z.object({
   ...purchaseFields,
+  singleProduct: z.boolean().optional(),
   items: z.array(createPurchaseItemSchema).min(1, 'Añade al menos un producto.').max(50),
-}).strict().superRefine(validatePurchaseOwnership);
+}).strict().superRefine(validatePurchaseOwnership)
+  .refine((input) => !input.singleProduct || input.items.length === 1, 'Registra un solo producto por compra.');
 export const updatePurchaseSchema = z.object({ ...purchaseFields, ownershipType: purchaseFields.ownershipType.removeDefault() }).partial().strict()
   .refine((value) => Object.keys(value).length > 0, 'Indica algún cambio.');
 export const purchaseParamsSchema = z.object({

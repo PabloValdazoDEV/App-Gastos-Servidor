@@ -134,10 +134,13 @@ export async function getPurchase(prisma, context) {
 }
 
 export async function createPurchase(prisma, context, input) {
-  return runSerializableTransaction(prisma, async (database) => {
+  return runSerializableTransaction(prisma, (database) => createPurchaseInTransaction(database, context, input));
+}
+
+export async function createPurchaseInTransaction(database, context, input) {
     const { household } = await requireHouseholdRole(database, context);
     const { shares, ...ownership } = await normalizeOwnership(database, context.householdId, input);
-    const { items } = input;
+    const items = input.singleProduct ? input.items.map((item) => ({ ...item, priceCents: input.totalCents })) : input.items;
     const payment = preparePurchasePayment(input, undefined, householdToday(household.timezone));
     await stampPurchasePaymentAllocations(database, context, { ...ownership, shares }, payment);
     const metadata = omit(input, ['items', 'personalPersonId', 'ownershipType', 'shares', ...PAYMENT_INPUT_FIELDS]);
@@ -151,7 +154,6 @@ export async function createPurchase(prisma, context, input) {
     await audit(database, context, 'PURCHASE_CREATED', purchase.id);
     await auditPaymentChanges(database, context, payment, purchase);
     return responseFor(purchase, context, household);
-  });
 }
 
 export async function updatePurchase(prisma, context, input) {
@@ -192,6 +194,9 @@ export async function updatePurchaseInTransaction(database, context, input) {
         } });
       }
     }
+    if (existing.singleProduct && input.totalCents != null) {
+      await database.purchaseItem.updateMany({ where: { purchaseId: existing.id }, data: { priceCents: input.totalCents } });
+    }
     const purchase = await database.purchase.update({
       where: { id: context.purchaseId }, data: {
         ...metadata, ...ownership, ...payment.purchaseFields,
@@ -222,6 +227,7 @@ export async function mutatePurchaseItem(prisma, context, operation, input) {
     if (operation === 'delete' && purchase.items.length <= 1) {
       throw createDomainError(409, 'PURCHASE_LAST_ITEM', 'La compra debe conservar al menos un producto. Puedes archivar la compra completa.');
     }
+    if (operation === 'create' && purchase.singleProduct) throw createDomainError(400, 'PURCHASE_SINGLE_PRODUCT', 'Esta compra corresponde a un producto. Crea otra compra para añadir un producto distinto.');
     if (operation === 'create' && purchase.items.length >= 50) throw createDomainError(400, 'PURCHASE_ITEMS_LIMIT', 'Una compra admite como máximo 50 productos.');
     // All item writes also write their parent, preventing concurrent last-item
     // deletes and a date edit racing a warranty edit (Serializable retries).
@@ -232,6 +238,7 @@ export async function mutatePurchaseItem(prisma, context, operation, input) {
       resourceId = created.id;
     } else if (operation === 'update') {
       const metadata = omit(input, ['warrantyDurationMonths', 'warrantyEndsAt']);
+      if (purchase.singleProduct) metadata.priceCents = purchase.totalCents;
       const hasWarranty = ['warrantyEndsAt', 'warrantyDurationMonths'].some((field) => Object.hasOwn(input, field));
       await database.purchaseItem.update({ where: { id: item.id }, data: { ...metadata, ...(hasWarranty ? warrantyFields(input, purchase.purchaseDate) : {}) } });
     } else {

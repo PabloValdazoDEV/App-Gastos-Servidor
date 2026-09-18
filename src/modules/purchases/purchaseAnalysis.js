@@ -17,9 +17,9 @@ export function createPurchaseAnalysisRateLimiter({ max = DEFAULT_RECEIPT_ANALYS
   });
 }
 
-export function registerPurchaseAnalysisRoutes({ router, prisma, requireCsrf, documentStorage, receiptAnalyzer, aiConfig }) {
+export function registerPurchaseAnalysisRoutes({ router, prisma, requireCsrf, documentStorage, receiptAnalyzer, aiConfig, analysisLimiter }) {
   const analyzer = receiptAnalyzer ?? createOpenAIReceiptAnalyzer({ config: aiConfig });
-  const limiter = createPurchaseAnalysisRateLimiter({ max: aiConfig?.analysisLimitPerHour });
+  const limiter = analysisLimiter ?? createPurchaseAnalysisRateLimiter({ max: aiConfig?.analysisLimitPerHour });
   const inFlight = new Set();
   const base = '/households/:householdId/purchases/:purchaseId/documents/:documentId';
   const context = (request) => ({ ...purchaseAnalysisParamsSchema.parse(request.params), userId: getAuthenticatedUserId(request) });
