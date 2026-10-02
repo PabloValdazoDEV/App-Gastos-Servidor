@@ -12,6 +12,7 @@ import {
   splitAmount,
 } from './money.service.js';
 import { customWeeksIntervalDays } from './recurrence.service.js';
+import { businessToday } from './businessClock.service.js';
 
 const MONTH_DIVISORS = Object.freeze({
   MONTHLY: 1,
@@ -161,7 +162,7 @@ export function calculateVariableStatistics(
   {
     householdMarginBps = 0,
     categoryMarginBps = null,
-    calculationDate = new Date(),
+    calculationDate = businessToday(),
     applySafetyMargin = false,
   } = {},
 ) {
@@ -245,7 +246,9 @@ function sumByPerson(items) {
 }
 
 export function calculateMonthlyStandardBudget({
-  calculationDate = new Date(),
+  calculationDate = businessToday(),
+  historyDate = calculationDate,
+  estimatedClosingMonth = null,
   householdMarginBps = 0,
   people,
   recurringExpenses = [],
@@ -303,7 +306,7 @@ export function calculateMonthlyStandardBudget({
   const variableLines = variableGroups.flatMap((group) => {
     const statistics = calculateVariableStatistics(group.months ?? [], {
       applySafetyMargin: group.applySafetyMargin,
-      calculationDate,
+      calculationDate: historyDate,
       householdMarginBps,
       categoryMarginBps: categoryMargin(group),
     });
@@ -316,6 +319,7 @@ export function calculateMonthlyStandardBudget({
       scope: group.scope ?? 'HOUSEHOLD',
       personalPersonId: group.personalPersonId ?? null,
       baseCents: statistics.baseCents,
+      estimatedClosingMonth: statistics.latestMonth === estimatedClosingMonth ? estimatedClosingMonth : null,
       effectiveMarginBps: statistics.effectiveMarginBps,
       amountCents: statistics.recommendedCents,
       statistics,

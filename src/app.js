@@ -10,6 +10,7 @@ import { createErrorHandler } from './middleware/errorHandler.js';
 import { notFoundHandler } from './middleware/notFound.js';
 import { createGeneralRateLimiter } from './middleware/rateLimit.js';
 import { createRequestContext } from './middleware/requestContext.js';
+import { createDevelopmentDate } from './middleware/developmentDate.js';
 import { createFinanceRouter } from './modules/finance/index.js';
 import { createHouseholdDomainRouter } from './modules/household-domain/index.js';
 import { createNotificationRouter } from './modules/notifications/index.js';
@@ -33,7 +34,7 @@ export const createApp = ({
   }
 
   const app = express();
-  const corsMiddleware = cors(createCorsOptions(config.cors.origins));
+  const corsMiddleware = cors(createCorsOptions(config.cors.origins, config.nodeEnv));
   const authenticate = createAuthenticate({ prisma: prismaClient, config });
   const requireCsrf =
     config.nodeEnv === 'development'
@@ -59,6 +60,7 @@ export const createApp = ({
     app.use('/api', createGeneralRateLimiter(config.rateLimit.general));
   }
   app.use(corsMiddleware);
+  app.use('/api/households', createDevelopmentDate(config.nodeEnv));
   const parseJson = express.json({ limit: JSON_BODY_LIMIT, strict: true });
   const parseForm = express.urlencoded({ extended: false, limit: JSON_BODY_LIMIT });
   app.use((request, response, next) => {

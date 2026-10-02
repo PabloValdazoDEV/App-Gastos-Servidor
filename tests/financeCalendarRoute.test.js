@@ -31,6 +31,9 @@ describe('finance calendar route', () => {
     };
     const findManyExpenses = vi.fn().mockResolvedValue([recurringExpense]);
     const prisma = {
+      utilityInvoice: { findMany: vi.fn().mockResolvedValue([]) },
+      variableExpenseMonth: { findMany: vi.fn().mockResolvedValue([]) },
+      oneTimeExpense: { findMany: vi.fn().mockResolvedValue([]) },
       householdUserAccess: {
         findFirst: vi.fn().mockResolvedValue({
           role: 'MEMBER',

@@ -492,6 +492,7 @@ model UtilityInvoice {
   periodEnd        DateTime          @db.Date
   invoiceDate      DateTime          @db.Date
   chargeDate       DateTime?         @db.Date
+  paidAt           DateTime?         @db.Date
   notes            String?           @db.VarChar(2000)
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
@@ -535,6 +536,7 @@ model OneTimeExpense {
   scope            ExpenseScope     @default(HOUSEHOLD)
   expenseDate      DateTime         @db.Date
   applySafetyMargin Boolean         @default(false)
+  paidAt           DateTime?        @db.Date
   notes            String?          @db.VarChar(2000)
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
@@ -593,6 +595,7 @@ model VariableExpenseMonth {
   summaryAmountCents Int?
   isComplete         Boolean                @default(true)
   notes              String?                @db.VarChar(2000)
+  paidAt             DateTime?              @db.Date
   createdAt          DateTime               @default(now())
   updatedAt          DateTime               @updatedAt
   household          Household              @relation(fields: [householdId], references: [id], onDelete: Restrict)
@@ -611,6 +614,7 @@ model VariableExpenseEntry {
   spentOn                DateTime             @db.Date
   merchant               String?              @db.VarChar(120)
   amountCents            Int
+  paidAt                 DateTime?            @db.Date
   notes                  String?              @db.VarChar(1000)
   createdAt              DateTime             @default(now())
   updatedAt              DateTime             @updatedAt

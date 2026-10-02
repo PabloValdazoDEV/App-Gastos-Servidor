@@ -149,7 +149,7 @@ describe.skipIf(!enabled)('monthly progress API with PostgreSQL', () => {
       } });
       const withOneOff = await read();
       expect(withOneOff.monthlyProgress.common).toMatchObject({ budgetCents: 135_000, usedCents: 0, remainingCents: 135_000 });
-      expect(withOneOff.planning).toMatchObject({ budgetChangedSincePreparation: true, preparedHouseholdBudgetCents: 120_000, householdBudgetCents: 135_000 });
+      expect(withOneOff.planning).toMatchObject({ budgetChangedSincePreparation: true, preparedHouseholdBudgetCents: 120_000, householdBudgetCents: 120_000, budgetComparison: { householdDifferenceCents: 15_000 } });
       expect(withOneOff.planning.contributions.map((row) => row.confirmedPersonalBalanceCents))
         .toEqual(before.planning.contributions.map((row) => row.confirmedPersonalBalanceCents));
       expect(await tx.monthlyPlanning.findUnique({ where: { id: before.planning.id }, include: { contributions: true } })).toEqual(storedBefore);

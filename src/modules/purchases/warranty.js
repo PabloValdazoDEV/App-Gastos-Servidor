@@ -1,4 +1,5 @@
 import { addCalendarMonths, differenceInCalendarDays, toCivilDate, toIsoDate } from '../../services/date.service.js';
+import { businessToday } from '../../services/businessClock.service.js';
 import { createDomainError } from '../household-domain/domainError.js';
 import { serializePurchasePayment } from './purchasePayments.js';
 
@@ -29,12 +30,8 @@ export function warrantyState(warrantyEndsAt, today) {
   };
 }
 
-export function householdToday(timezone, now = new Date()) {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit',
-  }).formatToParts(now);
-  const get = (type) => parts.find((part) => part.type === type).value;
-  return toCivilDate(`${get('year')}-${get('month')}-${get('day')}`);
+export function householdToday(timezone, now) {
+  return businessToday(timezone, now);
 }
 
 export function serializePurchase(purchase, today, { list = false } = {}) {

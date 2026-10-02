@@ -80,6 +80,9 @@ export function buildCalendar({
   recurringExpenses,
   payments = [],
   purchaseSources = [],
+  invoices = [],
+  variableMonths = [],
+  oneTimeExpenses = [],
   today,
   view = '30_DAYS',
   anchorDate = today,
@@ -164,7 +167,65 @@ export function buildCalendar({
       status: source.status === 'PAID' ? 'PAID' : deriveScheduledStatus(today, source.dueDate),
       daysFromToday: differenceInCalendarDays(source.dueDate, today),
     }));
-  const events = [...eventsByOccurrence.values(), ...purchaseEvents].sort((left, right) => {
+  const isInRange = (date) => compareCivilDates(date, rangeStart) >= 0
+    && compareCivilDates(date, rangeEnd) <= 0;
+  // These expense records have a payment confirmation date, but no separate
+  // actual amount; confirmation must not alter their planned date or amount.
+  const recordedEvent = (record, sourceType, date, name, amountCents) => ({
+    id: record.id,
+    sourceType,
+    name,
+    dueDate: toIsoDate(date),
+    datePrecision: 'DAY',
+    amountCents,
+    expectedAmountCents: amountCents,
+    actualAmountCents: record.paidAt ? amountCents : null,
+    paymentId: null,
+    paymentDate: record.paidAt ? toIsoDate(record.paidAt) : null,
+    canRegisterPayment: !record.paidAt,
+    canEditPayment: false,
+    scope: record.scope,
+    personalPersonId: record.personalPersonId ?? null,
+    personalPerson: record.personalPerson ?? null,
+    category: record.category ?? null,
+    status: record.paidAt ? 'PAID' : 'RECORDED',
+    daysFromToday: differenceInCalendarDays(date, today),
+  });
+  const invoiceEvents = invoices.filter((invoice) => isInRange(invoice.chargeDate ?? invoice.invoiceDate))
+    .map((invoice) => ({
+      ...recordedEvent(invoice, 'INVOICE', invoice.chargeDate ?? invoice.invoiceDate,
+        invoice.category?.name ?? 'Factura', invoice.amountCents),
+      dateBasis: invoice.chargeDate ? 'CHARGE_DATE' : 'INVOICE_DATE',
+    }));
+  const oneTimeEvents = oneTimeExpenses.filter((expense) => isInRange(expense.expenseDate))
+    .map((expense) => ({
+      ...recordedEvent(expense, 'ONE_TIME_EXPENSE', expense.expenseDate, expense.name, expense.amountCents),
+      status: expense.paidAt ? 'PAID' : 'UNCONFIRMED',
+      expectedAmountCents: expense.amountCents,
+      actualAmountCents: expense.paidAt ? expense.amountCents : null,
+    }));
+  const variableEvents = variableMonths.flatMap((month) => {
+    if (month.entryMode === 'SUMMARY') {
+      const periodStart = new Date(Date.UTC(month.year, month.month - 1, 1));
+      const periodEnd = endOfMonth(periodStart);
+      if (compareCivilDates(periodStart, rangeEnd) > 0 || compareCivilDates(periodEnd, rangeStart) < 0) return [];
+      return [{
+        ...recordedEvent(month, 'VARIABLE_SUMMARY', periodStart,
+          month.category?.name ?? 'Gasto variable', month.summaryAmountCents),
+        variableMonthId: month.id,
+        datePrecision: 'MONTH',
+        periodStart: toIsoDate(periodStart),
+        periodEnd: toIsoDate(periodEnd),
+        daysFromToday: null,
+      }];
+    }
+    return (month.entries ?? []).filter((entry) => isInRange(entry.spentOn)).map((entry) => ({
+      ...recordedEvent({ ...month, id: entry.id, paidAt: entry.paidAt }, 'VARIABLE_EXPENSE', entry.spentOn,
+        entry.merchant || month.category?.name || 'Gasto variable', entry.amountCents),
+      variableMonthId: month.id,
+    }));
+  });
+  const events = [...eventsByOccurrence.values(), ...purchaseEvents, ...invoiceEvents, ...oneTimeEvents, ...variableEvents].sort((left, right) => {
     const dateComparison = left.dueDate.localeCompare(right.dueDate);
     if (dateComparison !== 0) return dateComparison;
     return (left.expenseId ?? left.id).localeCompare(right.expenseId ?? right.id);

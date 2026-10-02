@@ -174,6 +174,65 @@ function synchronizeExpenseReads(prisma, expenseId) {
 afterAll(async () => database?.$disconnect());
 
 describe.skipIf(!enabled)('calendario interactivo y pagos con PostgreSQL real', () => {
+  it('incluye facturas, variables y puntuales con fechas correctas y privacidad por hogar y persona', async () => {
+    await withRollbackFixture(async (tx, fixture) => {
+      const ownIds = [];
+      const hiddenIds = [];
+      for (const person of [null, ...fixture.people]) {
+        const base = {
+          householdId: fixture.household.id, categoryId: fixture.category.id,
+          scope: person ? 'PERSONAL' : 'HOUSEHOLD', personalPersonId: person?.id ?? null,
+        };
+        const invoice = await tx.utilityInvoice.create({ data: {
+          ...base, amountCents: 1500, periodStart: new Date('2026-09-01'), periodEnd: new Date('2026-09-30'),
+          invoiceDate: new Date('2026-09-30'), chargeDate: new Date('2026-10-10'),
+        } });
+        const oneTime = await tx.oneTimeExpense.create({ data: {
+          ...base, name: 'Reparación de prueba', amountCents: 2500, expenseDate: new Date('2026-10-12'),
+        } });
+        const variable = await tx.variableExpenseMonth.create({ data: {
+          ...base, ownerKey: person?.id ?? 'HOUSEHOLD', year: 2026, month: 10,
+          entryMode: 'DETAIL', isComplete: false,
+          entries: { create: { spentOn: new Date('2026-10-14'), merchant: 'Tienda de prueba', amountCents: 3500 } },
+        }, include: { entries: true } });
+        const target = person?.id === fixture.people[1].id ? hiddenIds : ownIds;
+        target.push(invoice.id, oneTime.id, variable.entries[0].id);
+      }
+      const outsideInvoice = await tx.utilityInvoice.create({ data: {
+        householdId: fixture.household.id, categoryId: fixture.category.id, amountCents: 9999,
+        periodStart: new Date('2026-10-01'), periodEnd: new Date('2026-10-31'),
+        invoiceDate: new Date('2026-10-10'), chargeDate: new Date('2026-11-01'),
+      } });
+      hiddenIds.push(outsideInvoice.id);
+      const otherHousehold = await tx.household.create({ data: { name: 'Otro hogar de prueba', ownerUserId: fixture.userIds[1] } });
+      const otherCategory = await tx.category.create({ data: { householdId: otherHousehold.id, name: 'Otra categoría', slug: 'other-test', icon: 'Zap', color: '#000000' } });
+      const otherExpense = await tx.oneTimeExpense.create({ data: { householdId: otherHousehold.id, categoryId: otherCategory.id, name: 'Otro hogar', expenseDate: new Date('2026-10-12'), amountCents: 9999 } });
+      hiddenIds.push(otherExpense.id);
+
+      const events = await calendarEvents(fixture, { query: { view: 'MONTH', anchorDate: '2026-10-15' } });
+      expect(events.filter((event) => event.id).map((event) => event.id).sort()).toEqual(ownIds.sort());
+      expect(events.some((event) => hiddenIds.includes(event.id))).toBe(false);
+      expect(events.filter((event) => event.sourceType === 'INVOICE')).toEqual([
+        expect.objectContaining({ dueDate: '2026-10-10', dateBasis: 'CHARGE_DATE', status: 'RECORDED' }),
+        expect.objectContaining({ dueDate: '2026-10-10', dateBasis: 'CHARGE_DATE', status: 'RECORDED' }),
+      ]);
+      const rolling = await calendarEvents(fixture, { query: { view: '30_DAYS', anchorDate: '2026-10-15' } });
+      expect(rolling.some((event) => ownIds.includes(event.id))).toBe(false);
+      expect(rolling.find((event) => event.id === outsideInvoice.id)).toMatchObject({ dueDate: '2026-11-01' });
+
+      // Summary ranges must include overlapping months on both sides of a year boundary.
+      for (const [year, month] of [[2026, 12], [2027, 1]]) {
+        await tx.variableExpenseMonth.create({ data: {
+          householdId: fixture.household.id, categoryId: fixture.category.id, ownerKey: 'HOUSEHOLD',
+          year, month, entryMode: 'SUMMARY', summaryAmountCents: 1200,
+        } });
+      }
+      const yearBoundary = await calendarEvents(fixture, { query: { view: '30_DAYS', anchorDate: '2026-12-20' } });
+      expect(yearBoundary.filter((event) => event.sourceType === 'VARIABLE_SUMMARY').map((event) => event.periodStart))
+        .toEqual(['2026-12-01', '2027-01-01']);
+    });
+  });
+
   it('15/10 pagado → 12/11 omitido → 10/12 accionable, con histórico visible en el calendario', async () => {
     await withRollbackFixture(async (tx, fixture) => {
       const before = (await calendarEvents(fixture)).slice(0, 3);

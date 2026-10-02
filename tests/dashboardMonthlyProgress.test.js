@@ -19,11 +19,16 @@ const recurring = (overrides = {}) => ({
   isActive: true, archivedAt: null, personalPersonId: null,
   ...overrides,
 });
-const paid = (overrides = {}) => ({
-  status: 'PAID', dueDate: day('2026-09-30'), actualAmountCents: 58_000,
-  recurringExpense: { householdId: 'household', scope: 'HOUSEHOLD', personalPersonId: null },
-  ...overrides,
-});
+const paid = (overrides = {}) => {
+  const parent = recurring(overrides.recurringExpense);
+  return {
+    id: 'payment', recurringExpenseId: parent.id,
+    status: 'PAID', dueDate: day('2026-09-30'), actualAmountCents: 58_000,
+    paymentDate: day('2026-09-30'),
+    ...overrides,
+    recurringExpense: parent,
+  };
+};
 
 function matches(record, where) {
   return Object.entries(where).every(([key, value]) => {
@@ -85,6 +90,8 @@ describe('Dashboard monthly progress integration', () => {
     expect(result.monthlyProgress.personal).toMatchObject({ personId: 'own', personName: 'Yo', budgetCents: 20_000 });
     expect(result.cashCoverage.common).toMatchObject({ balanceCents: 145_000, cushionCents: 45_000, balanceSource: 'HOUSEHOLD' });
     expect(result.cashCoverage.personal).toBeNull();
+    expect(result.monthlyOverview.common).toMatchObject({ balanceCents: 145_000, expectedCents: 100_000, paidCents: 0, remainingCents: 100_000, projectedBalanceCents: 45_000 });
+    expect(result.monthlyOverview.personal).toMatchObject({ expectedCents: 20_000, balanceCents: null, projectedBalanceCents: null });
   });
 
   it('uses current recommendation, margins and one-offs, never the prepared budget or recovery adjustment', async () => {
@@ -108,6 +115,8 @@ describe('Dashboard monthly progress integration', () => {
     expect(before.balanceCents).toBe(999);
     expect(before.cashCoverage.common).toMatchObject({ balanceCents: 145_000, remainingBudgetCents: 42_000, cushionCents: 103_000, balanceSource: 'ACCOUNTS' });
     expect(before.cashCoverage.personal).toMatchObject({ balanceCents: 80_000, balanceSource: 'ACCOUNTS' });
+    expect(before.monthlyOverview.common).toMatchObject({ balanceCents: 145_000, paidCents: 58_000, remainingCents: 0, projectedBalanceCents: 145_000 });
+    expect(before.monthlyOverview.personal.balanceCents).toBe(80_000);
     state.accounts[0].balanceCents = 30_000;
     expect((await read()).cashCoverage.common).toMatchObject({ balanceCents: 30_000, shortfallCents: 12_000, status: 'SHORTFALL' });
   });
@@ -117,6 +126,7 @@ describe('Dashboard monthly progress integration', () => {
     planning.contributions[1].confirmedPersonalBalanceCents = null;
     const result = await fixture({ planning }).read();
     expect(result.cashCoverage.personal).toMatchObject({ personId: 'own', balanceCents: 30_000, balanceSource: 'MONTHLY_PLANNING' });
+    expect(result.monthlyOverview.personal.balanceCents).toBeNull();
   });
 
   it('counts archived recurring payments, but never skipped payments, on dueDate not paymentDate', async () => {
@@ -141,14 +151,28 @@ describe('Dashboard monthly progress integration', () => {
 
   it('combines recorded variable and invoice amounts without changing historical recommendations', async () => {
     const { state, read } = fixture({ payments: [paid({ actualAmountCents: 30_000 })] });
-    state.variables.push({ householdId: 'household', scope: 'HOUSEHOLD', categoryId: 'variable', category,
-      ownerKey: 'HOUSEHOLD', year: 2026, month: 9, entryMode: 'DETAIL', entries: [{ amountCents: 18_000 }] });
-    state.invoices.push({ householdId: 'household', scope: 'HOUSEHOLD', categoryId: category.id, category,
+    state.variables.push({ id: 'variable-month', householdId: 'household', scope: 'HOUSEHOLD', categoryId: 'variable', category,
+      ownerKey: 'HOUSEHOLD', year: 2026, month: 9, entryMode: 'DETAIL', entries: [{ id: 'entry', spentOn: day('2026-09-10'), amountCents: 18_000 }] });
+    state.invoices.push({ id: 'invoice', householdId: 'household', scope: 'HOUSEHOLD', categoryId: category.id, category,
       amountCents: 10_000, periodStart: day('2026-08-01'), periodEnd: day('2026-08-31'),
       invoiceDate: day('2026-08-31'), chargeDate: day('2026-09-20') });
     const result = await read();
     expect(result.monthlyProgress.common.usedCents).toBe(58_000);
     expect(result.budget.lines.find((line) => line.type === 'VARIABLE')).toBeUndefined();
+  });
+
+  it('feeds the overview with the real historical average and only the unregistered remainder', async () => {
+    const { state, read } = fixture();
+    const food = { id: 'food', name: 'Supermercado' };
+    state.variables = [7, 8, 9].map((month) => ({
+      id: `food-${month}`, householdId: 'household', scope: 'HOUSEHOLD', categoryId: 'food', category: food,
+      ownerKey: 'HOUSEHOLD', year: 2026, month, entryMode: month === 9 ? 'DETAIL' : 'SUMMARY',
+      summaryAmountCents: month === 7 ? 40000 : month === 8 ? 60000 : null,
+      entries: month === 9 ? [{ id: 'shop', spentOn: day('2026-09-05'), amountCents: 20000, paidAt: day('2026-09-05') }] : [],
+    }));
+    const result = await read();
+    expect(result.monthlyOverview.common).toMatchObject({ expectedCents: 150000, paidCents: 20000, estimatedCents: 30000, remainingCents: 130000, projectedBalanceCents: 15000 });
+    expect(result.monthlyOverview.common.lines.find((line) => line.status === 'ESTIMATED')).toMatchObject({ basisTotalCents: 50000, recordedCents: 20000, amountCents: 30000 });
   });
 
   it('filters private data at query time and does not leak other private planning totals', async () => {
@@ -160,7 +184,12 @@ describe('Dashboard monthly progress integration', () => {
     const result = await read();
     expect(result.monthlyProgress.personal.usedCents).toBe(0);
     expect(result.monthlyProgress.personal.budgetCents).toBe(20_000);
-    expect(result.planning.recommendedBudgetCents).toBe(120_000);
+    expect(result.planning.recommendedBudgetCents).toBe(20_001);
+    expect(result.budget.recommendedBudgetCents).toBe(120_000);
+    expect(result.budget.contributions.find((item) => item.personId === 'other')).toMatchObject({ personalAmountsHidden: true, personalExpenseCents: 0 });
+    expect(result.budget.contributions.find((item) => item.personId === 'own').personalAmountsHidden).toBe(false);
+    expect(result.planning.contributions.find((item) => item.householdPersonId === 'other').personalAmountsHidden).toBe(true);
+    expect(result.planning.contributions.find((item) => item.householdPersonId === 'own').personalAmountsHidden).toBe(false);
     expect(result.planning).toMatchObject({ budgetChangedSincePreparation: true, preparedHouseholdBudgetCents: 1 });
     expect(result.planning.breakdown).toBeNull();
     expect(JSON.stringify(result)).not.toContain('987654');
@@ -192,12 +221,12 @@ describe('Dashboard monthly progress integration', () => {
     expect(database.expensePayment.findMany).toHaveBeenCalledTimes(1);
     expect(database.expensePayment.findMany).toHaveBeenCalledWith({
       where: {
-        status: 'PAID', dueDate: { gte: day(start), lt: day(end) },
+        dueDate: { gte: day(start), lt: day(end) },
         recurringExpense: { householdId: 'household', OR: [
           { scope: 'HOUSEHOLD' }, { scope: 'PERSONAL', personalPerson: { linkedUserId: 'viewer' } },
         ] },
       },
-      select: { status: true, dueDate: true, actualAmountCents: true, recurringExpense: { select: { scope: true, personalPersonId: true } } },
+      include: { recurringExpense: { include: { category: true } } },
     });
     expect(database.recurringExpense.findMany).toHaveBeenCalledTimes(1);
     expect(database.utilityInvoice.findMany).toHaveBeenCalledTimes(1);

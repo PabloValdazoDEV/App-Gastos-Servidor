@@ -98,7 +98,7 @@ describe.skipIf(!enabled)('purchase financial source integration (local PostgreS
     const stored = await tx.monthlyPlanning.findUnique({ where: { id: before.id }, include: { contributions: true } });
     const purchase = await create({ financing: septemberFinancing });
     const first = await dashboard();
-    expect(first.planning).toMatchObject({ budgetChangedSincePreparation: true, preparedHouseholdBudgetCents: 0, householdBudgetCents: 25_000 });
+    expect(first.planning).toMatchObject({ budgetChangedSincePreparation: true, preparedHouseholdBudgetCents: 0, householdBudgetCents: 0, budgetComparison: { householdDifferenceCents: 25_000 } });
     const balancesByPerson = (planning) => Object.fromEntries(planning.contributions.map((row) => [row.householdPersonId, row.confirmedPersonalBalanceCents]));
     expect(balancesByPerson(first.planning)).toEqual(balancesByPerson(before));
     expect((await read('/simulation?date=2026-09-17')).monthlyStandardBudgetCents).toBe(25_000);

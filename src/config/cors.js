@@ -1,6 +1,6 @@
 import { AppError } from '../errors/AppError.js';
 
-export const createCorsOptions = (allowedOrigins) => {
+export const createCorsOptions = (allowedOrigins, nodeEnv) => {
   const allowlist = new Set(allowedOrigins);
 
   return {
@@ -27,6 +27,7 @@ export const createCorsOptions = (allowedOrigins) => {
       'X-CSRF-Token',
       'X-Document-Filename',
       'X-Request-Id',
+      ...(nodeEnv === 'development' ? ['X-Development-Date'] : []),
     ],
     exposedHeaders: [
       'RateLimit',

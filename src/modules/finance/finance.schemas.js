@@ -279,7 +279,7 @@ export const createInvoiceSchema = invoiceBase
 
 export const updateInvoiceSchema = invoiceBase
   .partial()
-  .extend(updateScopeFields)
+  .extend({ ...updateScopeFields, paymentDate: civilDate.nullable().optional() })
   .strict()
   .refine((body) => Object.keys(body).length > 0, 'Indica algún dato para actualizar.');
 
@@ -306,6 +306,7 @@ export const createOneTimeExpenseSchema = z
     amountCents: cents,
     ...scopeFields,
     expenseDate: civilDate,
+    paymentDate: civilDate.nullable().optional(),
     notes: optionalNotes,
   })
   .strict()
@@ -313,7 +314,7 @@ export const createOneTimeExpenseSchema = z
 
 export const updateOneTimeExpenseSchema = createOneTimeExpenseSchema
   .partial()
-  .extend({ ...updateScopeFields, applySafetyMargin: z.boolean().optional() })
+  .extend({ ...updateScopeFields, applySafetyMargin: z.boolean().optional(), paymentDate: civilDate.nullable().optional() })
   .strict()
   .refine((body) => Object.keys(body).length > 0, 'Indica algún dato para actualizar.');
 
@@ -363,7 +364,8 @@ export const upsertVariableMonthSchema = z
     summaryAmountCents: cents.nullable().optional(),
     isComplete: z.boolean().default(true),
     notes: optionalNotes,
-    entries: z.array(variableEntry).max(1_000).optional(),
+    paymentDate: civilDate.nullable().optional(),
+    entries: z.array(variableEntry.extend({ paymentDate: civilDate.nullable().optional() })).max(1_000).optional(),
   })
   .strict()
   .superRefine((body, context) => {
@@ -400,6 +402,10 @@ export const variableQuerySchema = z
   })
   .strict();
 
+export const variableExpensePaymentSchema = z
+  .object({ entryId: uuid.optional(), paymentDate: civilDate.nullable() })
+  .strict();
+
 export const updateBalanceSchema = z
   .object({ balanceCents: signedCents })
   .strict();
@@ -427,6 +433,37 @@ export const prepareMonthSchema = z
       .default([]),
   })
   .strict();
+
+export const fundPlanningSchema = z.object({
+  scope: z.enum(['HOUSEHOLD', 'PERSONAL', 'ALL']).default('ALL'),
+  action: z.enum(['CONFIRM', 'REVOKE']).default('CONFIRM'),
+  expectedVersion: z.number().int().nonnegative().optional(),
+  reason: z.string().trim().min(3).max(300).optional(),
+}).strict().superRefine((body, context) => {
+  if (body.action === 'REVOKE' && (body.scope === 'ALL' || body.expectedVersion === undefined || !body.reason)) {
+    context.addIssue({ code: 'custom', message: 'Para deshacer, elige conjunta o personal e indica el motivo y la versión revisada.' });
+  }
+});
+
+export const revisePlanningSchema = z.object({
+  expectedVersion: z.number().int().nonnegative(),
+  previewFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  reason: z.string().trim().min(3).max(300),
+}).strict();
+
+export const previewPlanningExtraSchema = z.object({
+  expectedVersion: z.number().int().nonnegative(),
+  amountCents: cents.refine((value) => value > 0, 'Indica un extra mayor que cero.'),
+}).strict();
+export const createPlanningExtraSchema = previewPlanningExtraSchema.extend({
+  id: uuid,
+  reason: z.string().trim().min(3).max(300),
+}).strict();
+export const changePlanningExtraSchema = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('CONFIRM'), expectedVersion: z.number().int().nonnegative(), personId: uuid }).strict(),
+  z.object({ action: z.literal('REVOKE'), expectedVersion: z.number().int().nonnegative(), personId: uuid, reason: z.string().trim().min(3).max(300) }).strict(),
+  z.object({ action: z.literal('CANCEL'), expectedVersion: z.number().int().nonnegative(), reason: z.string().trim().min(3).max(300) }).strict(),
+]);
 
 export const planningQuerySchema = z
   .object({
@@ -469,5 +506,6 @@ export const financeParamsSchema = z
     accountId: uuid.optional(),
     recoveryPlanId: uuid.optional(),
     planningId: uuid.optional(),
+    extraId: uuid.optional(),
   })
   .passthrough();

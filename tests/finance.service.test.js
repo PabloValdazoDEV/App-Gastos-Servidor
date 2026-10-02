@@ -83,7 +83,7 @@ describe('planningMatchesBudget', () => {
     ).toBe(false);
   });
 
-  it('recalcula el reparto manteniendo los saldos ya confirmados', () => {
+  it('conserva el reparto guardado y comunica los cambios por separado', () => {
     const rebased = rebasePlanningToBudget(
       {
         confirmedBalanceCents: 80_000,
@@ -129,15 +129,14 @@ describe('planningMatchesBudget', () => {
     expect(rebased.contributions).toEqual([
       expect.objectContaining({
         confirmedPersonalBalanceCents: 120_000,
-        contributionBps: 2_000,
-        standardHouseholdCents: 20_000,
+        contributionBps: 5_000,
       }),
       expect.objectContaining({
         confirmedPersonalBalanceCents: 90_000,
-        contributionBps: 8_000,
-        standardHouseholdCents: 80_000,
+        contributionBps: 5_000,
       }),
     ]);
+    expect(rebased.budgetComparison.householdDifferenceCents).toBe(100_000);
   });
 });
 

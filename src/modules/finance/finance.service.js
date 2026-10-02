@@ -1,6 +1,11 @@
 import { calculateMonthlyStandardBudget } from '../../services/budgetCalculator.service.js';
+import { businessToday } from '../../services/businessClock.service.js';
+import { variableForecastWindow } from '../../services/variableForecast.service.js';
+import { activePlanning, comparePlanningBudget, hasFundingConfirmation, planningFunding, publicBudgetLines } from './planningSnapshot.js';
+import { extraFunding, publicPlanningExtras } from './planningExtras.js';
 import { addCalendarDays, addCalendarMonths, startOfMonth, toCivilDate, toIsoDate } from '../../services/date.service.js';
 import { calculateMonthlySpendingProgress } from '../../services/monthlySpendingProgress.service.js';
+import { calculateMonthlyOverview } from '../../services/monthlyOverview.service.js';
 import { budgetMarginLookup } from './budgetMarginPreference.service.js';
 import { loadPurchaseFinancialSources, upcomingPurchasePayments } from './purchaseFinancialSources.js';
 import {
@@ -43,7 +48,7 @@ function groupBy(items, keyFor) {
   return groups;
 }
 
-export function sanitizePlanningForViewer(planning, actorUserId) {
+function sanitizePlanningView(planning, actorUserId) {
   if (!planning || !actorUserId) return planning;
   const identities = planning.breakdown?.personIdentitySnapshot;
   const canViewPersonal = (contribution) => Array.isArray(identities) && identities.some((identity) =>
@@ -56,24 +61,69 @@ export function sanitizePlanningForViewer(planning, actorUserId) {
       planning.contributions?.filter(canViewPersonal).reduce((sum, item) => sum + item.personalExpenseCents, 0) ?? 0
     ),
     personalHistoryRequiresConfirmation: !Array.isArray(identities),
+    budgetLines: publicBudgetLines(planning.breakdown?.budget?.lines, (personId) =>
+      canViewPersonal({ householdPersonId: personId })),
     // The stored breakdown can contain every personal line. It is only an
     // internal calculation artifact, so never send it to a household member.
     breakdown: null,
     contributions: (planning.contributions ?? []).map((contribution) => {
-      if (canViewPersonal(contribution)) return contribution;
-      return {
+      const visible = canViewPersonal(contribution) ? contribution : {
         ...contribution,
         confirmedPersonalBalanceCents: null,
         personalExpenseCents: 0,
         totalRecommendedCents:
           contribution.standardHouseholdCents + contribution.temporaryAdjustmentCents,
       };
+      return { ...visible, personalAmountsHidden: !canViewPersonal(contribution), funding: planningFunding(planning, visible),
+        canConfirmPersonal: canViewPersonal(contribution) };
     }),
+  };
+}
+
+export function sanitizePlanningForViewer(original, actorUserId) {
+  if (!original) return original;
+  const planning = activePlanning(original);
+  if (!actorUserId) return planning;
+  const visible = sanitizePlanningView(planning, actorUserId);
+  const extras = publicPlanningExtras(original);
+  const revisions = original.breakdown?.revisions ?? [];
+  const ownIds = new Set((original.breakdown?.personIdentitySnapshot ?? []).filter((item) =>
+    item.linkedUserId === actorUserId).map((item) => item.personId));
+  const historyItem = (source, revision, at, reason) => {
+    const view = sanitizePlanningView(source, actorUserId);
+    return { revision, at, reason, householdBudgetCents: view.householdBudgetCents,
+      recommendedBudgetCents: view.recommendedBudgetCents,
+      contributions: view.contributions.map(({ personName, householdPersonId, standardHouseholdCents, personalExpenseCents, temporaryAdjustmentCents, totalRecommendedCents, personalAmountsHidden }) =>
+        ({ personName, householdPersonId, standardHouseholdCents, personalExpenseCents, temporaryAdjustmentCents, totalRecommendedCents, personalAmountsHidden })) };
+  };
+  return {
+    ...visible,
+    extras,
+    extraFunding: extraFunding(extras),
+    contributions: visible.contributions.map((item) => {
+      const extra = extraFunding(extras, item.householdPersonId);
+      return { ...item, extraFunding: extra, totalPendingCents: item.funding.pendingCents + extra.pendingCents,
+        totalConfirmedCents: item.funding.confirmedCents + extra.confirmedCents };
+    }),
+    stateVersion: original.breakdown?.stateVersion ?? 0,
+    revision: revisions.length,
+    canRevise: !hasFundingConfirmation(planning) && !extras.some((item) => !item.cancelledAt) && Array.isArray(original.breakdown?.personIdentitySnapshot),
+    revisionHistory: [historyItem(original, 0, original.preparedAt, null), ...revisions.map((record, index) =>
+      historyItem(activePlanning({ ...original, breakdown: { ...original.breakdown, revisions: [record] } }), index + 1, record.at, record.reason))],
+    fundingHistory: (original.breakdown?.fundingEvents ?? []).filter((event) =>
+      event.scope !== 'PERSONAL' || event.personIds?.some((id) => ownIds.has(id)))
+      .map(({ action, scope, at, reason, revision }) => ({ action, scope, at, reason, revision })),
   };
 }
 
 export function planningMatchesBudget(planning, budget) {
   if (!planning) return false;
+
+  if (Array.isArray(planning.budgetLines) && Array.isArray(budget?.lines)) {
+    const amounts = new Map(planning.budgetLines.map((line) => [`${line.type}:${line.id}`, line.amountCents]));
+    if (amounts.size !== budget.lines.length || budget.lines.some((line) =>
+      amounts.get(`${line.type}:${line.id}`) !== line.amountCents)) return false;
+  }
 
   const plannedContributions = [...(planning.contributions ?? [])].sort((left, right) =>
     left.householdPersonId.localeCompare(right.householdPersonId),
@@ -99,39 +149,19 @@ export function planningMatchesBudget(planning, budget) {
 
 export function rebasePlanningToBudget(planning, budget) {
   if (!planning) return null;
-
-  const previousContributions = new Map(
-    (planning.contributions ?? []).map((contribution) => [
-      contribution.householdPersonId,
-      contribution,
-    ]),
-  );
+  // Kept as an API-compatible export: changes are now reported separately.
+  // Never replace the original amounts, even for an unfunded prepared month.
   return {
     ...planning,
     budgetChangedSincePreparation: true,
     preparedHouseholdBudgetCents: planning.householdBudgetCents,
-    recommendedBudgetCents: budget.recommendedBudgetCents,
-    householdBudgetCents: budget.householdBudgetCents,
-    contributions: budget.contributions.map((contribution) => {
-      const previous = previousContributions.get(contribution.personId);
-      const temporaryAdjustmentCents = previous?.temporaryAdjustmentCents ?? 0;
-      return {
-        ...previous,
-        householdPersonId: contribution.personId,
-        personName: contribution.personName,
-        contributionBps: contribution.contributionBps,
-        standardHouseholdCents: contribution.standardHouseholdCents,
-        personalExpenseCents: contribution.personalExpenseCents,
-        temporaryAdjustmentCents,
-        totalRecommendedCents: contribution.totalStandardCents + temporaryAdjustmentCents,
-      };
-    }),
+    budgetComparison: comparePlanningBudget(planning, budget),
   };
 }
 
 export function dateOrToday(value) {
   if (value) return toCivilDate(value);
-  return toCivilDate(new Date());
+  return businessToday();
 }
 
 export function availableCommonBalance(inputs, balanceOverride) {
@@ -149,7 +179,7 @@ export function personalAccountRequiredCents(contribution) {
   return contribution.personalExpenseCents ?? 0;
 }
 
-export async function loadFinancialInputs(database, householdId, actorUserId, calculationDate = new Date()) {
+export async function loadFinancialInputs(database, householdId, actorUserId, calculationDate = businessToday()) {
   const firstDay = startOfMonth(calculationDate);
   const [household, recurringExpenses, invoices, variableMonths, oneTimeExpenses, accounts, preferences, purchaseSources] =
     await Promise.all([
@@ -292,7 +322,7 @@ export function getBudgetReadiness(household) {
   };
 }
 
-export function calculateBudgetFromInputs(inputs, calculationDate = new Date()) {
+export function calculateBudgetFromInputs(inputs, calculationDate = businessToday()) {
   const date = dateOrToday(calculationDate);
   const readiness = getBudgetReadiness(inputs.household);
   if (!readiness.ready) {
@@ -318,6 +348,7 @@ export function calculateBudgetFromInputs(inputs, calculationDate = new Date()) 
     readiness,
     ...calculateMonthlyStandardBudget({
       calculationDate: date,
+      ...variableForecastWindow(date, businessToday(inputs.household.timezone ?? 'UTC')),
       householdMarginBps: inputs.household.safetyMarginBps,
       people: inputs.household.people,
       recurringExpenses: inputs.recurringExpenses,
@@ -336,7 +367,17 @@ export async function calculateHouseholdBudget(
   actorUserId,
 ) {
   const inputs = await loadFinancialInputs(database, householdId, actorUserId, dateOrToday(calculationDate));
-  return { inputs, budget: calculateBudgetFromInputs(inputs, calculationDate) };
+  const budget = calculateBudgetFromInputs(inputs, calculationDate);
+  if (actorUserId) {
+    // Other personal sources were excluded at query time. Their zero is a
+    // redaction placeholder, not evidence that this person has no expenses.
+    const ownIds = new Set(inputs.household.people.filter((person) =>
+      person.linkedUserId === actorUserId).map((person) => person.id));
+    budget.contributions = budget.contributions.map((contribution) => ({
+      ...contribution, personalAmountsHidden: !ownIds.has(contribution.personId),
+    }));
+  }
+  return { inputs, budget };
 }
 
 export function upcomingPayments(recurringExpenses, calculationDate, purchaseSources = []) {
@@ -383,18 +424,14 @@ export function loadMonthlyProgressPayments(database, householdId, calculationDa
   const firstDay = startOfMonth(calculationDate);
   return database.expensePayment.findMany({
     where: {
-      status: 'PAID',
       dueDate: { gte: firstDay, lt: addCalendarMonths(firstDay, 1) },
       // Do not filter active/archived: an archived expense still consumed this
       // month's budget. Parent ownership remains the authorization boundary.
       recurringExpense: { householdId, ...visibleExpenseWhere(actorUserId) },
     },
-    select: {
-      status: true,
-      dueDate: true,
-      actualAmountCents: true,
-      recurringExpense: { select: { scope: true, personalPersonId: true } },
-    },
+    // Include omitted occurrences as well, so the month never forecasts them
+    // again. The legacy progress calculator still counts only PAID records.
+    include: { recurringExpense: { include: { category: true } } },
   });
 }
 
@@ -469,10 +506,9 @@ export async function calculateDashboard(
     budget.contributions.length > 0 &&
     budget.contributions.every((contribution) => (planningRecord.contributions ?? []).some((previous) =>
       previous.householdPersonId === contribution.personId && previous.confirmedPersonalBalanceCents !== null));
-  const planningIsUsable = Boolean(planningRecord) && hasMonthlyPersonalBalances;
   const visiblePlanning = sanitizePlanningForViewer(planningRecord, actorUserId, inputs.household.people);
-  const planning = planningIsUsable
-    ? planningMatchesBudget(visiblePlanning, budget)
+  const planning = planningRecord
+    ? !budget.readiness.ready || planningMatchesBudget(visiblePlanning, budget)
       ? visiblePlanning
       : rebasePlanningToBudget(visiblePlanning, budget)
     : null;
@@ -515,6 +551,18 @@ export async function calculateDashboard(
   const viewerBalanceCents = hasViewerAccount
     ? personalAccountBalances.get(viewerPersonId)
     : monthlyPersonalBalances.get(viewerPersonId) ?? null;
+  const monthlyOverview = calculateMonthlyOverview({
+    ...inputs,
+    calculationDate: date,
+    payments: monthlyPayments,
+    budgetLines: budget.lines,
+    viewerPersonId,
+    includeViewerPurchaseHistory: hasViewerPurchaseHistory,
+    commonBalanceCents: availableCommonBalance(inputs, balanceOverride),
+    commonBalanceSource: balanceOverride !== undefined ? 'OVERRIDE' : hasCommonAccounts ? 'ACCOUNTS' : 'HOUSEHOLD',
+    // A month's old confirmed balance is not a current personal account balance.
+    personalBalanceCents: hasViewerAccount ? personalAccountBalances.get(viewerPersonId) : null,
+  });
   const progress = calculateMonthlySpendingProgress({
     calculationDate: date,
     // Always use today's recommendation (including margins and one-offs), not
@@ -556,6 +604,7 @@ export async function calculateDashboard(
       contributionMode: inputs.household.contributionMode,
     },
     calculationDate: toIsoDate(date),
+    monthlyOverview,
     ...progress,
     budget,
     balanceCents,

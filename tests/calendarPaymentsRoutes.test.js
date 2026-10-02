@@ -45,6 +45,9 @@ function fixture(overrides = {}) {
     payments: [],
   };
   const database = {
+    utilityInvoice: { findMany: vi.fn().mockResolvedValue([]) },
+    variableExpenseMonth: { findMany: vi.fn().mockResolvedValue([]) },
+    oneTimeExpense: { findMany: vi.fn().mockResolvedValue([]) },
     householdUserAccess: { findFirst: vi.fn().mockResolvedValue({ role: 'MEMBER', household: { id: householdId, isActive: true } }) },
     householdPerson: { findMany: vi.fn(async () => state.expenses.flatMap((expense) => expense.personalPerson ?? [])) },
     recurringExpense: {

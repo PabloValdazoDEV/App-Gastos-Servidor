@@ -1,10 +1,11 @@
 import express from 'express';
 import { budgetMarginLookup } from './budgetMarginPreference.service.js';
 import { registerBudgetMarginPreferenceRoutes } from './budgetMarginPreferences.js';
+import { registerPlanningChangeRoutes } from './planningChanges.js';
 
 import { buildCalendar, calendarRange } from '../../services/calendar.service.js';
 import { loadPurchaseFinancialSources } from './purchaseFinancialSources.js';
-import { addCalendarMonths, toIsoDate } from '../../services/date.service.js';
+import { addCalendarMonths, startOfMonth, toIsoDate } from '../../services/date.service.js';
 import {
   calculateInvoiceStatistics,
   calculateVariableStatistics,
@@ -48,6 +49,7 @@ import {
   updateOneTimeExpenseSchema,
   updateRecurringExpenseSchema,
   updateRecoverySchema,
+  variableExpensePaymentSchema,
   upsertVariableMonthSchema,
   variableQuerySchema,
 } from './finance.schemas.js';
@@ -711,6 +713,10 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
           ...body,
           ...normalizeNullableFields(body, ['chargeDate', 'notes']),
         };
+        if (Object.hasOwn(body, 'paymentDate')) {
+          invoiceData.paidAt = body.paymentDate;
+          delete invoiceData.paymentDate;
+        }
         if (existing.scope !== undefined || Object.hasOwn(body, 'scope')) {
           invoiceData.scope = scope;
           invoiceData.personalPersonId = personalPersonId ?? null;
@@ -817,6 +823,11 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
                 scope: body.scope,
                 personalPersonId: body.personalPersonId ?? null,
                 entryMode: body.entryMode,
+                ...(body.entryMode === 'DETAIL' && existing.entryMode !== 'DETAIL'
+                  ? { paidAt: null }
+                  : body.entryMode === 'SUMMARY' && (existing.entryMode !== 'SUMMARY' || Object.hasOwn(body, 'paymentDate'))
+                    ? { paidAt: body.paymentDate ?? null }
+                    : {}),
                 summaryAmountCents:
                   body.entryMode === 'SUMMARY' ? body.summaryAmountCents : null,
                 isComplete: body.isComplete,
@@ -835,6 +846,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
                 entryMode: body.entryMode,
                 summaryAmountCents:
                   body.entryMode === 'SUMMARY' ? body.summaryAmountCents : null,
+                paidAt: body.entryMode === 'SUMMARY' ? body.paymentDate ?? null : null,
                 isComplete: body.isComplete,
                 notes: body.notes ?? null,
               },
@@ -847,6 +859,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
               merchant: entry.merchant ?? null,
               amountCents: entry.amountCents,
               notes: entry.notes ?? null,
+              paidAt: entry.paymentDate ?? null,
             })),
           });
         }
@@ -863,6 +876,44 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
         });
       });
       return sendSuccess(response, item, { statusCode: 200 });
+    }),
+  );
+
+  router.patch(
+    '/households/:householdId/variable-expenses/:variableMonthId/payment',
+    requireCsrf,
+    asyncRoute(async (request, response) => {
+      const { householdId, variableMonthId } = financeParamsSchema.parse(request.params);
+      const body = variableExpensePaymentSchema.parse(request.body);
+      await memberAccess(prisma, request);
+      const existing = await getVariableMonth(prisma, householdId, variableMonthId, request.auth.userId);
+      if (body.entryId && existing.entryMode !== 'DETAIL') {
+        throw createDomainError(404, 'VARIABLE_EXPENSE_ENTRY_NOT_FOUND', 'No se encontró el gasto variable.');
+      }
+      if (!body.entryId && existing.entryMode !== 'SUMMARY') {
+        throw createDomainError(400, 'VARIABLE_PAYMENT_ENTRY_REQUIRED', 'Selecciona el apunte que quieres marcar como pagado.');
+      }
+      await prisma.$transaction(async (database) => {
+        if (body.entryId) {
+          const result = await database.variableExpenseEntry.updateMany({
+            where: { id: body.entryId, variableExpenseMonthId: variableMonthId },
+            data: { paidAt: body.paymentDate },
+          });
+          if (!result.count) {
+            throw createDomainError(404, 'VARIABLE_EXPENSE_ENTRY_NOT_FOUND', 'No se encontró el gasto variable.');
+          }
+        } else {
+          await database.variableExpenseMonth.update({ where: { id: variableMonthId }, data: { paidAt: body.paymentDate } });
+        }
+        await createAuditLog(database, {
+          actorUserId: request.auth.userId,
+          householdId,
+          action: 'EXPENSE_CHANGED',
+          resourceType: body.entryId ? 'VariableExpenseEntry' : 'VariableExpenseMonth',
+          resourceId: body.entryId ?? variableMonthId,
+        });
+      });
+      return sendSuccess(response, { id: body.entryId ?? variableMonthId, paymentDate: body.paymentDate });
     }),
   );
 
@@ -955,6 +1006,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
     asyncRoute(async (request, response) => {
       const { householdId } = financeParamsSchema.parse(request.params);
       const body = createOneTimeExpenseSchema.parse(request.body);
+      const { paymentDate, ...expenseFields } = body;
       await memberAccess(prisma, request);
       await requireHouseholdCategory(prisma, { householdId, categoryId: body.categoryId });
       await validateScope(prisma, householdId, body.scope, body.personalPersonId);
@@ -962,7 +1014,8 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
         const item = await database.oneTimeExpense.create({
           data: {
             householdId,
-            ...body,
+            ...expenseFields,
+            paidAt: paymentDate ?? null,
             personalPersonId: body.personalPersonId ?? null,
             notes: body.notes ?? null,
           },
@@ -1001,11 +1054,13 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
         : existing.personalPersonId;
       await requireHouseholdCategory(prisma, { householdId, categoryId });
       await validateScope(prisma, householdId, scope, personalPersonId);
+      const { paymentDate, ...expenseFields } = body;
       const expense = await prisma.$transaction(async (database) => {
         const item = await database.oneTimeExpense.update({
           where: { id: expenseId },
           data: {
-            ...body,
+            ...expenseFields,
+            ...(Object.hasOwn(body, 'paymentDate') ? { paidAt: paymentDate } : {}),
             categoryId,
             scope,
             personalPersonId: personalPersonId ?? null,
@@ -1252,10 +1307,20 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
       await memberAccess(prisma, request);
       const result = await runSerializableTransaction(prisma, async (database) => {
         await memberAccess(database, request);
+        const date = startOfMonth(body.calculationDate);
+        const year = date.getUTCFullYear();
+        const month = date.getUTCMonth() + 1;
+        const previous = await database.monthlyPlanning.findUnique({
+          where: { householdId_year_month: { householdId, year, month } },
+        });
+        if (previous) {
+          throw createDomainError(409, 'MONTH_ALREADY_PREPARED',
+            'Este mes ya tiene una previsión guardada. Consulta sus diferencias sin sustituir las aportaciones confirmadas.');
+        }
         const dashboard = await calculateDashboard(
           database,
           householdId,
-          body.calculationDate,
+          date,
           body.confirmedBalanceCents,
           undefined,
         );
@@ -1284,9 +1349,6 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
             'Confirma el saldo personal de cada persona activa.',
           );
         }
-        const date = body.calculationDate;
-        const year = date.getUTCFullYear();
-        const month = date.getUTCMonth() + 1;
         const temporaryAdjustments = dashboard.activeRecoveryPlan
           ? new Map(
               distributeTemporaryAdjustment(
@@ -1302,17 +1364,6 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
           where: { householdId, isActive: true, archivedAt: null },
           select: { id: true, linkedUserId: true },
         });
-        const previous = await database.monthlyPlanning.findUnique({
-          where: { householdId_year_month: { householdId, year, month } },
-        });
-        if (previous) {
-          await database.monthlyPlanningContribution.deleteMany({
-            where: { monthlyPlanningId: previous.id },
-          });
-          await database.householdBalanceSnapshot.deleteMany({
-            where: { monthlyPlanningId: previous.id },
-          });
-        }
         const data = {
           householdId,
           preparedByUserId: request.auth.userId,
@@ -1335,9 +1386,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
           }),
           preparedAt: new Date(),
         };
-        const planning = previous
-          ? await database.monthlyPlanning.update({ where: { id: previous.id }, data })
-          : await database.monthlyPlanning.create({ data });
+        const planning = await database.monthlyPlanning.create({ data });
         await database.monthlyPlanningContribution.createMany({
           data: dashboard.budget.contributions.map((contribution) => {
             const temporaryAdjustmentCents =
@@ -1394,31 +1443,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
     }),
   );
 
-  router.patch(
-    '/households/:householdId/plannings/:planningId/fund',
-    requireCsrf,
-    asyncRoute(async (request, response) => {
-      const { householdId, planningId } = financeParamsSchema.parse(request.params);
-      await memberAccess(prisma, request);
-      const existing = await prisma.monthlyPlanning.findFirst({ where: { id: planningId, householdId } });
-      if (!existing) {
-        throw createDomainError(404, 'PLANNING_NOT_FOUND', 'No se encontró la planificación.');
-      }
-      const planning = await prisma.monthlyPlanning.update({
-        where: { id: planningId },
-        data: { fundingStatus: 'FUNDED', fundedAt: new Date() },
-        include: { contributions: true },
-      });
-      const viewerPerson = await prisma.householdPerson.findFirst({
-        where: { householdId, linkedUserId: request.auth.userId },
-        select: { id: true, linkedUserId: true },
-      });
-      return sendSuccess(
-        response,
-        sanitizePlanningForViewer(planning, request.auth.userId, viewerPerson ? [viewerPerson] : []),
-      );
-    }),
-  );
+  registerPlanningChangeRoutes(router, { prisma, requireCsrf, memberAccess });
 
   router.get(
     '/households/:householdId/simulation',
@@ -1637,9 +1662,36 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
       const purchaseSources = await loadPurchaseFinancialSources(prisma, {
         householdId, actorUserId: request.auth.userId, from: rangeStart, to: rangeEnd,
       });
+      const visibleWhere = { householdId, ...visibleExpenseWhere(request.auth.userId, query.scope) };
+      const include = { category: true, personalPerson: { select: { id: true, name: true } } };
+      const dateRange = { gte: rangeStart, lte: rangeEnd };
+      const periods = [];
+      for (let month = startOfMonth(rangeStart); month <= rangeEnd; month = addCalendarMonths(month, 1)) {
+        periods.push({ year: month.getUTCFullYear(), month: month.getUTCMonth() + 1 });
+      }
+      const [invoices, variableMonths, oneTimeExpenses] = await Promise.all([
+        prisma.utilityInvoice.findMany({
+          where: {
+            ...visibleWhere,
+            AND: [{ OR: [
+              { chargeDate: dateRange },
+              { chargeDate: null, invoiceDate: dateRange },
+            ] }],
+          },
+          include,
+        }),
+        prisma.variableExpenseMonth.findMany({
+          where: { ...visibleWhere, AND: [{ OR: periods }] },
+          include: { ...include, entries: { where: { spentOn: dateRange }, orderBy: [{ spentOn: 'asc' }, { id: 'asc' }] } },
+        }),
+        prisma.oneTimeExpense.findMany({
+          where: { ...visibleWhere, expenseDate: dateRange },
+          include,
+        }),
+      ]);
       return sendSuccess(
         response,
-        buildCalendar({ recurringExpenses: expenses, payments,
+        buildCalendar({ recurringExpenses: expenses, payments, invoices, variableMonths, oneTimeExpenses,
           purchaseSources: purchaseSources.filter((source) => !query.scope || source.scope === query.scope),
           today, view: query.view, anchorDate }),
       );
