@@ -86,7 +86,7 @@ Los documentos opcionales de factura no añaden variables de entorno: sus límit
 | Variable | Obligatoria | Secreta | Uso |
 |---|---:|---:|---|
 | `REMINDER_JOB_ENABLED` | Sí | No | Permite ejecutar recordatorios. |
-| `REMINDER_JOB_CRON` | Sí | No | Expresión orientativa para scheduler. El job no depende de ella. |
+| `REMINDER_JOB_CRON` | Sí | No | Horario del scheduler; por defecto `0 10 * * *` (diario a las 10:00 en `DEFAULT_TIMEZONE`). |
 | `CRON_SECRET` | No | Sí | Protege un disparador HTTP futuro; no es necesario al ejecutar CLI. |
 | `RATE_LIMIT_WINDOW_MS` | Sí | No | Ventana general. |
 | `RATE_LIMIT_MAX` | Sí | No | Máximo general por ventana. |
@@ -96,6 +96,8 @@ Los documentos opcionales de factura no añaden variables de entorno: sus límit
 | `PASSWORD_RESET_TTL_MINUTES` | Sí | No | TTL de recuperación. |
 | `INVITATION_TTL_DAYS` | Sí | No | TTL de invitaciones. |
 | `LOG_LEVEL` | Sí | No | `fatal`, `error`, `warn`, `info`, `debug` o `silent`. |
+
+Para generar los recordatorios diariamente a las 10:00, configura `REMINDER_JOB_ENABLED=true`, `REMINDER_JOB_CRON=0 10 * * *` y `DEFAULT_TIMEZONE=Europe/Madrid`. La zona conserva las 10:00 locales al cambiar entre horario de verano e invierno. En despliegues existentes, actualiza también las variables del servidor: un valor explícito de `REMINDER_JOB_CRON` prevalece sobre el predeterminado. Reinicia el proceso API para aplicar los cambios.
 
 Los limitadores general, de auth por IP y de auth por cuenta usan memoria del proceso. En un despliegue con varias instancias deben usar un store compartido compatible, manteniendo la misma política. Configura `TRUST_PROXY_HOPS` según la topología real; un valor excesivo permite falsificar IPs y uno insuficiente agrupa clientes detrás del proxy.
 

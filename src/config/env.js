@@ -244,7 +244,7 @@ const envSchema = z
       .default('mailto:admin@example.com'),
 
     REMINDER_JOB_ENABLED: envBoolean(false),
-    REMINDER_JOB_CRON: z.string().trim().min(1).default('0 8 * * *'),
+    REMINDER_JOB_CRON: z.string().trim().min(1).default('0 10 * * *'),
     CRON_SECRET: optionalSecret,
 
     RATE_LIMIT_WINDOW_MS: envInteger(z.number().min(1), 900_000),
