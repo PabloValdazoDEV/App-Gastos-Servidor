@@ -18,7 +18,9 @@ describe('calendar with all expense types', () => {
     expect(events[1]).toMatchObject({ status: 'RECORDED', amountCents: 3000, dateBasis: 'INVOICE_DATE' });
     expect(events[2]).toMatchObject({ id: 'entry', variableMonthId: 'month', name: 'Supermercado', amountCents: 2400 });
     expect(events[3]).toMatchObject({ status: 'UNCONFIRMED', actualAmountCents: null, expectedAmountCents: 4000 });
-    for (const event of events.slice(1, 4)) expect(event).toMatchObject({ canRegisterPayment: false, canEditPayment: false, paymentId: null, paymentDate: null });
+    // Unpaid recorded expenses can be marked as paid directly from the calendar,
+    // but never get the recurring-payment record/edit actions.
+    for (const event of events.slice(1, 4)) expect(event).toMatchObject({ canRegisterPayment: true, canEditPayment: false, paymentId: null, paymentDate: null });
   });
 
   it('uses charge date before invoice date, includes range boundaries and excludes other periods', () => {

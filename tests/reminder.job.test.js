@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { runReminderJob } from '../src/jobs/reminder.job.js';
+import { buildReminderCandidates, runReminderJob } from '../src/jobs/reminder.job.js';
 import { calculateNextDueDate } from '../src/services/recurrence.service.js';
 
 function createPrismaFake(expenses) {
@@ -146,7 +146,7 @@ describe('runReminderJob', () => {
       dueDate: nextDueDate,
       offsetDays: 7,
       title: 'Gimnasio vence en 7 días',
-      message: 'Importe previsto: 40.00 €.',
+      message: 'Importe previsto: 40,00 €.',
     });
 
     expect((await run('2026-10-08')).generation).toEqual({
@@ -154,7 +154,12 @@ describe('runReminderJob', () => {
       created: 0,
       deliveriesCreated: 0,
     });
-    expect((await run('2026-10-09')).generation.candidates).toBe(0);
+    // The 7-day threshold is still the reached one, but it was already sent.
+    expect((await run('2026-10-09')).generation).toEqual({
+      candidates: 1,
+      created: 0,
+      deliveriesCreated: 0,
+    });
     expect(prisma.state.notifications.size).toBe(1);
     expect(prisma.state.deliveries.size).toBe(1);
     expect(deliver).toHaveBeenCalledTimes(1);
@@ -206,5 +211,105 @@ describe('runReminderJob', () => {
     expect(prisma.state.notifications.size).toBe(1);
     expect(prisma.state.deliveries.size).toBe(1);
     expect(deliver).toHaveBeenCalledTimes(1);
+  });
+});
+
+const USER_A = '00000000-0000-4000-8000-0000000000a1';
+const USER_B = '00000000-0000-4000-8000-0000000000b1';
+
+function access(userId, preference = {}) {
+  return {
+    userId,
+    isActive: true,
+    revokedAt: null,
+    user: {
+      isActive: true,
+      notificationPreference: {
+        inAppEnabled: true,
+        emailEnabled: false,
+        webPushEnabled: false,
+        defaultOffsets: [30, 7, 1],
+        ...preference,
+      },
+    },
+  };
+}
+
+function expense(overrides = {}) {
+  return {
+    id: '00000000-0000-4000-8000-0000000000e1',
+    householdId: '00000000-0000-4000-8000-0000000000h1',
+    name: 'Seguro',
+    amountCents: 4_500,
+    scope: 'HOUSEHOLD',
+    personalPerson: null,
+    endDate: null,
+    nextDueDate: new Date('2026-12-02T00:00:00.000Z'),
+    remindersEnabled: true,
+    isActive: true,
+    archivedAt: null,
+    reminderRules: [],
+    household: { timezone: 'Europe/Madrid', currency: 'EUR', accesses: [access(USER_A), access(USER_B)] },
+    ...overrides,
+  };
+}
+
+const jobConfig = { features: { email: false, webPush: false } };
+
+describe('buildReminderCandidates', () => {
+  it('recupera el aviso de 7 días si el servidor no estaba encendido ese día exacto', () => {
+    // Due 2026-12-02; on 2026-11-27 there are 5 days left: the 7-day reminder is owed.
+    const [candidate] = buildReminderCandidates(
+      [expense({ household: { timezone: 'Europe/Madrid', accesses: [access(USER_A)] } })],
+      new Date('2026-11-27T09:00:00.000Z'),
+      jobConfig,
+    );
+    expect(candidate).toMatchObject({ offsetDays: 7, title: 'Seguro vence en 5 días' });
+  });
+
+  it('no avisa antes del primer umbral', () => {
+    const candidates = buildReminderCandidates(
+      [expense()],
+      new Date('2026-10-01T09:00:00.000Z'),
+      jobConfig,
+    );
+    expect(candidates).toHaveLength(0);
+  });
+
+  it('avisa de un gasto personal solo a la persona vinculada', () => {
+    const candidates = buildReminderCandidates(
+      [expense({ scope: 'PERSONAL', personalPerson: { linkedUserId: USER_A } })],
+      new Date('2026-11-25T09:00:00.000Z'),
+      jobConfig,
+    );
+    expect(candidates.map((candidate) => candidate.userId)).toEqual([USER_A]);
+  });
+
+  it('no avisa de un gasto personal cuya persona no tiene cuenta', () => {
+    const candidates = buildReminderCandidates(
+      [expense({ scope: 'PERSONAL', personalPerson: { linkedUserId: null } })],
+      new Date('2026-11-25T09:00:00.000Z'),
+      jobConfig,
+    );
+    expect(candidates).toHaveLength(0);
+  });
+
+  it('no avisa de vencimientos posteriores a la fecha de fin', () => {
+    const candidates = buildReminderCandidates(
+      [expense({ endDate: new Date('2026-11-30T00:00:00.000Z') })],
+      new Date('2026-11-25T09:00:00.000Z'),
+      jobConfig,
+    );
+    expect(candidates).toHaveLength(0);
+  });
+
+  it('calcula "hoy" en la zona horaria del hogar', () => {
+    // 2026-11-30T23:30Z is already 1 December in Madrid: 1 day left, not 2.
+    const [candidate] = buildReminderCandidates(
+      [expense({ household: { timezone: 'Europe/Madrid', accesses: [access(USER_A)] } })],
+      new Date('2026-11-30T23:30:00.000Z'),
+      jobConfig,
+    );
+    expect(candidate).toMatchObject({ offsetDays: 1, title: 'Seguro vence en 1 día' });
   });
 });

@@ -1,6 +1,9 @@
 import {
   addCalendarDays,
   addCalendarMonths,
+  compareCivilDates,
+  endOfMonth,
+  startOfMonth,
   toCivilDate,
 } from './date.service.js';
 
@@ -17,6 +20,33 @@ export function customWeeksIntervalDays(intervalWeeks) {
     throw new RangeError('CUSTOM_WEEKS necesita intervalWeeks entero entre 2 y 520.');
   }
   return intervalWeeks * 7;
+}
+
+/*
+ * Whether a recurring expense still has to be funded in the month of
+ * `referenceDate`.
+ * - Ended: the end date is before that month, or its last due date inside
+ *   the end date has already been settled (nextDueDate moved past endDate).
+ * - Not started: only for charges of a month or less (they are covered by the
+ *   monthly contribution itself). Longer cycles keep reserving ahead of their
+ *   first due date.
+ */
+export function recurringExpenseIsInEffect(expense, referenceDate) {
+  const reference = toCivilDate(referenceDate);
+  if (expense.endDate) {
+    const end = toCivilDate(expense.endDate);
+    if (compareCivilDates(end, startOfMonth(reference)) < 0) return false;
+    if (expense.nextDueDate && compareCivilDates(expense.nextDueDate, end) > 0) return false;
+  }
+  const coveredMonthly =
+    expense.frequency === 'MONTHLY' ||
+    expense.frequency === 'WEEKLY' ||
+    (expense.frequency === 'CUSTOM_MONTHS' && expense.intervalMonths === 1) ||
+    (expense.frequency === 'CUSTOM_WEEKS' && expense.intervalWeeks * 7 <= 28);
+  if (coveredMonthly && expense.startDate) {
+    if (compareCivilDates(expense.startDate, endOfMonth(reference)) > 0) return false;
+  }
+  return true;
 }
 
 function restoreUsualDay(date, usualDayOfMonth) {

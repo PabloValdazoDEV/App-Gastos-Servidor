@@ -5,6 +5,7 @@ import { registerPlanningChangeRoutes } from './planningChanges.js';
 
 import { buildCalendar, calendarRange } from '../../services/calendar.service.js';
 import { loadPurchaseFinancialSources } from './purchaseFinancialSources.js';
+import { appendToVariableMonth } from './variableAppend.js';
 import { addCalendarMonths, startOfMonth, toIsoDate } from '../../services/date.service.js';
 import {
   calculateInvoiceStatistics,
@@ -13,6 +14,7 @@ import {
 import {
   distributeTemporaryAdjustment,
   previewRecoveryPlan,
+  recoveryAdjustmentForMonth,
 } from '../../services/planningCalculator.service.js';
 import { calculateNextDueDate } from '../../services/recurrence.service.js';
 import { sendSuccess } from '../../utils/httpResponses.js';
@@ -304,11 +306,17 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
           intervalMonths: Object.hasOwn(body, 'intervalMonths') ? body.intervalMonths : existing.intervalMonths,
           intervalWeeks: Object.hasOwn(body, 'intervalWeeks') ? body.intervalWeeks : existing.intervalWeeks,
         });
+        // When the user moves the next due date to another day, that day
+        // becomes the usual charge day; otherwise the next payment would jump
+        // back to the old day (e.g. edited from the 31st to the 5th → 31st).
+        const dueDateMoved =
+          body.nextDueDate &&
+          body.nextDueDate.getTime() !== existing.nextDueDate.getTime();
         const usualDayOfMonth = !monthBasedFrequency(intervals.frequency)
           ? null
           : Object.hasOwn(body, 'usualDayOfMonth')
             ? body.usualDayOfMonth
-            : !monthBasedFrequency(existing.frequency)
+            : dueDateMoved || !monthBasedFrequency(existing.frequency)
               ? (body.nextDueDate ?? existing.nextDueDate).getUTCDate()
               : existing.usualDayOfMonth ?? null;
 
@@ -809,6 +817,22 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
             },
           },
         });
+        // "Añadir gasto" on a month that already has data must never replace
+        // it: the new amount is added as one more entry and nothing is lost.
+        if (existing && body.append) {
+          const month = await appendToVariableMonth(database, existing, body);
+          await createAuditLog(database, {
+            actorUserId: request.auth.userId,
+            householdId,
+            action: 'EXPENSE_CHANGED',
+            resourceType: 'VariableExpenseMonth',
+            resourceId: month.id,
+          });
+          return database.variableExpenseMonth.findUnique({
+            where: { id: month.id },
+            include: { category: true, personalPerson: true, entries: { orderBy: { spentOn: 'asc' } } },
+          });
+        }
         // PostgreSQL rejects SUMMARY while detail entries still exist. Remove
         // the replaced details before changing mode, in this same transaction.
         if (existing && (body.entryMode === 'SUMMARY' || body.entries)) {
@@ -1349,10 +1373,15 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
             'Confirma el saldo personal de cada persona activa.',
           );
         }
-        const temporaryAdjustments = dashboard.activeRecoveryPlan
+        // A recovery plan only applies from its start month and never asks
+        // for more than what is still pending; each prepared month reduces
+        // the pending deficit until the plan completes by itself.
+        const recoveryPlan = dashboard.activeRecoveryPlan;
+        const recoveryAdjustmentCents = recoveryAdjustmentForMonth(recoveryPlan, date);
+        const temporaryAdjustments = recoveryAdjustmentCents > 0
           ? new Map(
               distributeTemporaryAdjustment(
-                dashboard.activeRecoveryPlan.monthlyAdjustmentCents,
+                recoveryAdjustmentCents,
                 dashboard.budget.contributions.map((contribution) => ({
                   id: contribution.personId,
                   contributionBps: contribution.contributionBps,
@@ -1405,6 +1434,17 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
             };
           }),
         });
+        if (recoveryAdjustmentCents > 0) {
+          const remainingDeficitCents =
+            recoveryPlan.remainingDeficitCents - recoveryAdjustmentCents;
+          await database.recoveryPlan.update({
+            where: { id: recoveryPlan.id },
+            data:
+              remainingDeficitCents <= 0
+                ? { remainingDeficitCents: 0, status: 'COMPLETED', completedAt: new Date() }
+                : { remainingDeficitCents },
+          });
+        }
         await database.household.update({
           where: { id: householdId },
           data: { currentBalanceCents: body.confirmedBalanceCents },
@@ -1526,9 +1566,27 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
           budget.readiness,
         );
       }
+      // The deficit is always recomputed from today's real data. A simulation
+      // with a hypothetical date or balance must never create a real plan.
+      const realSituation = await calculateHouseholdSimulation(
+        prisma,
+        householdId,
+        undefined,
+        undefined,
+        request.auth.userId,
+      );
+      const deficitCents = realSituation.deficitCents ?? 0;
+      if (deficitCents <= 0) {
+        throw createDomainError(
+          409,
+          'NO_REAL_DEFICIT',
+          'Con la fecha de hoy y vuestro saldo real no hay déficit que recuperar.',
+        );
+      }
       const startsOn = body.startsOn ?? dateOrToday();
       const preview = previewRecoveryPlan({
         ...body,
+        deficitCents,
         startsOn,
         upcomingPayments: upcomingPayments(inputs.recurringExpenses, startsOn, inputs.purchaseSources),
         relevantAvailableBalanceCents: availableCommonBalance(inputs),
@@ -1554,8 +1612,8 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
             monthlyPlanningId: body.monthlyPlanningId ?? null,
             createdByUserId: request.auth.userId,
             mode: body.mode,
-            initialDeficitCents: body.deficitCents,
-            remainingDeficitCents: body.deficitCents,
+            initialDeficitCents: deficitCents,
+            remainingDeficitCents: deficitCents,
             targetMonths: preview.targetMonths,
             maximumMonthlyCents: preview.maximumMonthlyCents,
             monthlyAdjustmentCents: preview.monthlyAdjustmentCents,

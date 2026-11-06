@@ -102,6 +102,24 @@ describe('API de recurrentes por semanas', () => {
     expect(response.body.data).toMatchObject({ frequency: 'MONTHLY', intervalWeeks: null, intervalMonths: null, usualDayOfMonth: 17 });
   });
 
+  it('al mover la fecha de un mensual del día 31 al 5, el día habitual pasa a ser el 5', async () => {
+    const { app } = fixture({
+      frequency: 'MONTHLY', intervalWeeks: null, usualDayOfMonth: 31,
+      nextDueDate: new Date('2026-10-31T00:00:00.000Z'),
+    });
+    const response = await request(app).patch(`${path}/${expenseId}`).send({ nextDueDate: '2026-11-05' }).expect(200);
+    expect(response.body.data.usualDayOfMonth).toBe(5);
+  });
+
+  it('editar otro campo de un mensual del 31 con vencimiento el 28 de febrero conserva el día 31', async () => {
+    const { app } = fixture({
+      frequency: 'MONTHLY', intervalWeeks: null, usualDayOfMonth: 31,
+      nextDueDate: new Date('2027-02-28T00:00:00.000Z'),
+    });
+    const response = await request(app).patch(`${path}/${expenseId}`).send({ name: 'Alquiler', nextDueDate: '2027-02-28' }).expect(200);
+    expect(response.body.data.usualDayOfMonth).toBe(31);
+  });
+
   it('CUSTOM_WEEKS → MONTHLY limpia semanas en backend, aunque el cliente envíe el valor anterior', async () => {
     const { app, database } = fixture();
     const response = await request(app).patch(`${path}/${expenseId}`).send({ frequency: 'MONTHLY', intervalWeeks: 4 }).expect(200);

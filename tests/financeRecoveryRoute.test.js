@@ -116,5 +116,16 @@ describe('finance recovery route', () => {
         { personId, temporaryAdjustmentCents: 25_000 },
       ],
     });
+
+    // Creating a real plan ignores the deficit sent by the client (it may come
+    // from a hypothetical simulation): with a large real balance there is none.
+    household.currentBalanceCents = 10_000_000;
+    prisma.recoveryPlan = { updateMany: vi.fn(), create: vi.fn() };
+    const created = await request(app)
+      .post(`/api/households/${householdId}/recovery-plans`)
+      .send({ deficitCents: 120_000, mode: 'RECOMMENDED' })
+      .expect(409);
+    expect(created.body.code).toBe('NO_REAL_DEFICIT');
+    expect(prisma.recoveryPlan.create).not.toHaveBeenCalled();
   });
 });

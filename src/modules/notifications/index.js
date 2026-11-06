@@ -6,6 +6,7 @@ import { requireHouseholdRole } from '../households/authorization.js';
 import { asyncRoute } from '../household-domain/asyncRoute.js';
 import { createAuditLog } from '../household-domain/audit.js';
 import { createDomainError } from '../household-domain/domainError.js';
+import { visibleExpenseWhere } from '../finance/finance.service.js';
 import {
   notificationListQuerySchema,
   notificationParamsSchema,
@@ -143,8 +144,9 @@ export const createNotificationRouter = ({ prisma, authenticate, requireCsrf }) 
         householdId,
         userId: request.auth.userId,
       });
+      // Personal expenses of other people behave as if they did not exist.
       const expense = await prisma.recurringExpense.findFirst({
-        where: { id: expenseId, householdId },
+        where: { id: expenseId, householdId, ...visibleExpenseWhere(request.auth.userId) },
       });
       if (!expense) {
         throw createDomainError(
@@ -171,8 +173,9 @@ export const createNotificationRouter = ({ prisma, authenticate, requireCsrf }) 
         householdId,
         userId: request.auth.userId,
       });
+      // Personal expenses of other people behave as if they did not exist.
       const expense = await prisma.recurringExpense.findFirst({
-        where: { id: expenseId, householdId },
+        where: { id: expenseId, householdId, ...visibleExpenseWhere(request.auth.userId) },
       });
       if (!expense) {
         throw createDomainError(

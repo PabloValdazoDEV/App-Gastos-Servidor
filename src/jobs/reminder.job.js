@@ -1,7 +1,13 @@
 import nodemailer from 'nodemailer';
 
-import { addCalendarDays, toCivilDate, toIsoDate } from '../services/date.service.js';
-import { centsToEuros } from '../services/money.service.js';
+import { businessToday } from '../services/businessClock.service.js';
+import {
+  addCalendarDays,
+  compareCivilDates,
+  differenceInCalendarDays,
+  toCivilDate,
+} from '../services/date.service.js';
+import { formatCurrency } from '../services/money.service.js';
 
 const DEFAULT_OFFSETS = Object.freeze([30, 7, 1]);
 const DEFAULT_PREFERENCE = Object.freeze({
@@ -26,15 +32,55 @@ function defaultChannels(preference, config) {
   );
 }
 
+// A personal expense is only visible to the user linked to its person.
+function canReceiveExpenseReminder(expense, access) {
+  if (expense.scope !== 'PERSONAL') return true;
+  const linkedUserId = expense.personalPerson?.linkedUserId;
+  return Boolean(linkedUserId) && linkedUserId === access.userId;
+}
+
+function dueDateIsWithinSchedule(expense) {
+  if (expense.endDate && compareCivilDates(expense.nextDueDate, expense.endDate) > 0) {
+    return false;
+  }
+  return true;
+}
+
+function formatReminderAmount(expense) {
+  try {
+    return formatCurrency(expense.amountCents, 'es-ES', expense.household?.currency ?? 'EUR');
+  } catch {
+    return formatCurrency(expense.amountCents);
+  }
+}
+
+/*
+ * Picks the most recent reminder threshold already reached for a due date.
+ * The job may not run every day (server off at the scheduled hour), so an
+ * exact "today + offset === dueDate" match would silently lose reminders.
+ * With offsets [30, 7, 1] and 5 days left this returns 7: the 7-day reminder
+ * is still owed, while the 30-day one is obsolete and is never sent late.
+ */
+function reachedThreshold(offsets, daysUntilDue) {
+  return offsets
+    .filter((offsetDays) => offsetDays >= daysUntilDue)
+    .reduce((closest, offsetDays) => (closest === null || offsetDays < closest ? offsetDays : closest), null);
+}
+
 export function buildReminderCandidates(expenses, today, config) {
-  const civilToday = toCivilDate(today);
   const candidates = [];
 
   expenses.forEach((expense) => {
     if (!expense.remindersEnabled || !expense.isActive || expense.archivedAt) return;
+    if (!dueDateIsWithinSchedule(expense)) return;
+
+    const civilToday = businessToday(expense.household?.timezone ?? 'UTC', today);
+    const daysUntilDue = differenceInCalendarDays(expense.nextDueDate, civilToday);
+    if (daysUntilDue < 0) return;
 
     expense.household.accesses.forEach((access) => {
       if (!access.isActive || access.revokedAt || !access.user?.isActive) return;
+      if (!canReceiveExpenseReminder(expense, access)) return;
       const preference = access.user.notificationPreference ?? DEFAULT_PREFERENCE;
       const explicitRules = expense.reminderRules.filter(
         (rule) => rule.userId === access.userId,
@@ -57,22 +103,24 @@ export function buildReminderCandidates(expenses, today, config) {
         grouped.set(rule.offsetDays, channels);
       });
 
-      grouped.forEach((channels, offsetDays) => {
-        if (channels.size === 0) return;
-        const reminderDate = addCalendarDays(civilToday, offsetDays);
-        if (toIsoDate(reminderDate) !== toIsoDate(expense.nextDueDate)) return;
-        const dayLabel = offsetDays === 1 ? '1 día' : `${offsetDays} días`;
-        candidates.push({
-          userId: access.userId,
-          householdId: expense.householdId,
-          recurringExpenseId: expense.id,
-          dueDate: expense.nextDueDate,
-          offsetDays,
-          title: offsetDays === 0 ? `${expense.name} vence hoy` : `${expense.name} vence en ${dayLabel}`,
-          message: `Importe previsto: ${centsToEuros(expense.amountCents)} €.`,
-          relatedPath: `/gastos/recurrentes/${expense.id}`,
-          channels: [...channels],
-        });
+      const activeOffsets = [...grouped.entries()]
+        .filter(([, channels]) => channels.size > 0)
+        .map(([offsetDays]) => offsetDays);
+      const offsetDays = reachedThreshold(activeOffsets, daysUntilDue);
+      if (offsetDays === null) return;
+
+      const channels = grouped.get(offsetDays);
+      const dayLabel = daysUntilDue === 1 ? '1 día' : `${daysUntilDue} días`;
+      candidates.push({
+        userId: access.userId,
+        householdId: expense.householdId,
+        recurringExpenseId: expense.id,
+        dueDate: expense.nextDueDate,
+        offsetDays,
+        title: daysUntilDue === 0 ? `${expense.name} vence hoy` : `${expense.name} vence en ${dayLabel}`,
+        message: `Importe previsto: ${formatReminderAmount(expense)}.`,
+        relatedPath: `/gastos/recurrentes/${expense.id}`,
+        channels: [...channels],
       });
     });
   });
@@ -86,13 +134,15 @@ export async function createDueNotifications({ prisma, config, today = new Date(
       remindersEnabled: true,
       isActive: true,
       archivedAt: null,
+      // One day of slack: "today" is resolved per household timezone below.
       nextDueDate: {
-        gte: toCivilDate(today),
-        lte: addCalendarDays(today, 365),
+        gte: addCalendarDays(toCivilDate(today), -1),
+        lte: addCalendarDays(today, 366),
       },
     },
     include: {
       reminderRules: true,
+      personalPerson: { select: { linkedUserId: true } },
       household: {
         include: {
           accesses: {
@@ -119,13 +169,11 @@ export async function createDueNotifications({ prisma, config, today = new Date(
     const existing = await prisma.notification.findUnique({
       where: { userId_recurringExpenseId_dueDate_offsetDays: unique },
     });
+    // A reminder already created keeps its original text; later runs only
+    // make sure its deliveries exist (idempotent catch-up).
     const notification = await prisma.notification.upsert({
       where: { userId_recurringExpenseId_dueDate_offsetDays: unique },
-      update: {
-        title: candidate.title,
-        message: candidate.message,
-        relatedPath: candidate.relatedPath,
-      },
+      update: {},
       create: {
         householdId: candidate.householdId,
         ...unique,

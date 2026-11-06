@@ -8,6 +8,7 @@ import { calculateMonthlySpendingProgress } from '../../services/monthlySpending
 import { calculateMonthlyOverview } from '../../services/monthlyOverview.service.js';
 import { budgetMarginLookup } from './budgetMarginPreference.service.js';
 import { loadPurchaseFinancialSources, upcomingPurchasePayments } from './purchaseFinancialSources.js';
+import { recurringExpenseIsInEffect } from '../../services/recurrence.service.js';
 import {
   calculateFinancialStatus,
   calculateSimulation,
@@ -288,7 +289,11 @@ export async function loadFinancialInputs(database, householdId, actorUserId, ca
 
   return {
     household,
-    recurringExpenses,
+    // Ended (or not yet started monthly) expenses must not keep asking for
+    // contributions, reserve or upcoming-payment slots.
+    recurringExpenses: recurringExpenses.filter((expense) =>
+      recurringExpenseIsInEffect(expense, calculationDate),
+    ),
     invoices,
     variableMonths,
     oneTimeExpenses,
@@ -604,6 +609,8 @@ export async function calculateDashboard(
       contributionMode: inputs.household.contributionMode,
     },
     calculationDate: toIsoDate(date),
+    // Lets the home screen show the viewer's own contribution first.
+    viewerPersonId: viewerPersonId ?? null,
     monthlyOverview,
     ...progress,
     budget,

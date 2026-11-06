@@ -72,7 +72,12 @@ const bootstrap = async () => {
 
   try {
     await listen(server, config.port);
-    reminderScheduler = startReminderScheduler({ prisma, config, logger });
+    reminderScheduler = startReminderScheduler({
+      prisma,
+      config,
+      logger,
+      runOnStartDelayMs: 15_000,
+    });
   } catch (error) {
     if (server.listening) {
       await new Promise((resolve) => server.close(() => resolve()));

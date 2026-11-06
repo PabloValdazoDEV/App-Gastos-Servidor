@@ -3,6 +3,7 @@ import {
   addCalendarMonths,
   compareCivilDates,
   differenceInCalendarDays,
+  startOfMonth,
   toCivilDate,
   toIsoDate,
 } from './date.service.js';
@@ -15,6 +16,17 @@ import {
 import { customWeeksIntervalDays } from './recurrence.service.js';
 
 const RECOMMENDED_RECOVERY_MONTHS = 12;
+
+/*
+ * Temporary adjustment a recovery plan adds to the month starting at
+ * `monthStart`. It applies from the plan's start month, never exceeds the
+ * pending deficit, and is 0 once the deficit is recovered.
+ */
+export function recoveryAdjustmentForMonth(plan, monthStart) {
+  if (!plan || plan.status !== 'ACTIVE') return 0;
+  if (compareCivilDates(startOfMonth(plan.startsOn), startOfMonth(monthStart)) > 0) return 0;
+  return Math.max(0, Math.min(plan.monthlyAdjustmentCents, plan.remainingDeficitCents));
+}
 
 const PERIOD_MONTHS = Object.freeze({
   MONTHLY: 1,

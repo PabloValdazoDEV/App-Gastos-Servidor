@@ -366,6 +366,8 @@ export const upsertVariableMonthSchema = z
     notes: optionalNotes,
     paymentDate: civilDate.nullable().optional(),
     entries: z.array(variableEntry.extend({ paymentDate: civilDate.nullable().optional() })).max(1_000).optional(),
+    // true from "Añadir gasto": add to an existing month instead of replacing it.
+    append: z.boolean().optional(),
   })
   .strict()
   .superRefine((body, context) => {

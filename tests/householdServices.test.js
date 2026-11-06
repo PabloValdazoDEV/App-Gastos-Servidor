@@ -183,6 +183,41 @@ describe('household domain services', () => {
     expect(transaction.invitation.updateMany).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['revocado', 'MEMBER', { isActive: false, revokedAt: new Date('2026-08-01T00:00:00.000Z') }],
+    ['vigente', 'ADMIN', { isActive: true, revokedAt: null }],
+  ])('un ADMIN %s reinvitado como MEMBER entra como %s', async (_label, expectedRole, accessState) => {
+    const fixedDate = new Date('2026-08-26T12:00:00.000Z');
+    const transaction = {
+      invitation: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: ids.invitation,
+          householdId: ids.household,
+          email: 'destino@example.com',
+          role: 'MEMBER',
+          status: 'PENDING',
+          expiresAt: new Date('2026-08-27T12:00:00.000Z'),
+          household: { id: ids.household, name: 'Casa', isActive: true, ownerUserId: ids.owner },
+          householdPerson: null,
+        }),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      user: {
+        findUnique: vi.fn().mockResolvedValue({ id: ids.target, email: 'destino@example.com', isActive: true }),
+      },
+      householdUserAccess: {
+        findUnique: vi.fn().mockResolvedValue({ id: ids.targetAccess, role: 'ADMIN', ...accessState }),
+        upsert: vi.fn(async ({ update }) => ({ id: ids.targetAccess, ...update })),
+      },
+      auditLog: { create: vi.fn().mockResolvedValue({}) },
+    };
+    const service = createInvitationsService({ prisma: transactionPrisma(transaction), now: () => fixedDate });
+
+    const result = await service.accept({ actorUserId: ids.target, token: 'a'.repeat(43) });
+
+    expect(result.access.role).toBe(expectedRole);
+  });
+
   it('rejects distribution IDs that belong to another household', async () => {
     const transaction = {
       householdUserAccess: {

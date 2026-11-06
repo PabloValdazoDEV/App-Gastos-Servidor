@@ -401,11 +401,17 @@ export const createInvitationsService = ({
             },
           },
         });
+        // A revoked or inactive access grants nothing: the returning user gets
+        // exactly the invited role (a revoked ADMIN re-invited as MEMBER must
+        // not silently recover ADMIN).
+        const accessIsCurrent =
+          Boolean(existingAccess?.isActive) && !existingAccess?.revokedAt;
         const existingRole =
-          existingAccess?.role === HOUSEHOLD_ROLES.OWNER &&
-          invitation.household.ownerUserId !== actorUserId
+          !accessIsCurrent ||
+          (existingAccess.role === HOUSEHOLD_ROLES.OWNER &&
+            invitation.household.ownerUserId !== actorUserId)
             ? null
-            : existingAccess?.role;
+            : existingAccess.role;
         const role = resolveAcceptedRole(existingRole, invitation.role);
         const claimed = await tx.invitation.updateMany({
           where: {

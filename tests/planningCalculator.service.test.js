@@ -5,6 +5,7 @@ import {
   calculateTheoreticalReserve,
   distributeTemporaryAdjustment,
   previewRecoveryPlan,
+  recoveryAdjustmentForMonth,
 } from '../src/services/planningCalculator.service.js';
 
 const standardBudget = { householdBudgetCents: 108_142 };
@@ -162,5 +163,37 @@ describe('planningCalculator.service', () => {
       { personId: 'a', temporaryAdjustmentCents: 3_001 },
       { personId: 'b', temporaryAdjustmentCents: 3_000 },
     ]);
+  });
+});
+
+describe('recoveryAdjustmentForMonth', () => {
+  const d = (value) => new Date(`${value}T00:00:00.000Z`);
+  const plan = {
+    status: 'ACTIVE',
+    startsOn: d('2026-11-06'),
+    monthlyAdjustmentCents: 60_000,
+    remainingDeficitCents: 60_000,
+  };
+
+  it('aplica el ajuste en el mes de inicio', () => {
+    expect(recoveryAdjustmentForMonth(plan, d('2026-11-01'))).toBe(60_000);
+  });
+
+  it('no aplica nada antes del mes de inicio', () => {
+    expect(recoveryAdjustmentForMonth(plan, d('2026-10-01'))).toBe(0);
+  });
+
+  it('no aplica nada cuando ya no queda déficit (el plan no se repite cada mes)', () => {
+    expect(recoveryAdjustmentForMonth({ ...plan, remainingDeficitCents: 0 }, d('2026-12-01'))).toBe(0);
+  });
+
+  it('en el último mes solo pide lo que falta', () => {
+    const capped = { ...plan, monthlyAdjustmentCents: 30_000, remainingDeficitCents: 10_000 };
+    expect(recoveryAdjustmentForMonth(capped, d('2027-02-01'))).toBe(10_000);
+  });
+
+  it('ignora planes cancelados o completados', () => {
+    expect(recoveryAdjustmentForMonth({ ...plan, status: 'COMPLETED' }, d('2026-11-01'))).toBe(0);
+    expect(recoveryAdjustmentForMonth(null, d('2026-11-01'))).toBe(0);
   });
 });
