@@ -400,4 +400,240 @@ describe('authentication routes', () => {
     expect(prisma.state.auditLogs).toHaveLength(0);
     expect(prisma.state.legalDocumentAcceptances).toHaveLength(0);
   });
+
+  describe('session lifecycle in production mode', () => {
+    const registerWithCookies = async (app, config) => {
+      const csrfResponse = await request(app)
+        .get('/api/auth/csrf')
+        .set('Origin', origin)
+        .expect(200);
+      const csrfToken = csrfResponse.body.data.csrfToken;
+      const csrfCookie = cookiePair(
+        csrfResponse.headers['set-cookie'],
+        config.cookies.csrfName,
+      );
+      const registration = await request(app)
+        .post('/api/auth/register')
+        .set('Origin', origin)
+        .set('X-CSRF-Token', csrfToken)
+        .set('Cookie', [csrfCookie])
+        .send({
+          name: 'Persona Demo',
+          email: 'session@example.com',
+          password,
+          ...privacyFields,
+        })
+        .expect(201);
+
+      return {
+        csrfToken,
+        csrfCookie,
+        accessCookie: cookiePair(
+          registration.headers['set-cookie'],
+          config.cookies.authName,
+        ),
+        refreshCookie: cookiePair(
+          registration.headers['set-cookie'],
+          config.cookies.refreshName,
+        ),
+      };
+    };
+
+    const clearedCookieNames = (response) =>
+      (response.headers['set-cookie'] ?? [])
+        .filter((cookie) => /Expires=Thu, 01 Jan 1970/i.test(cookie))
+        .map((cookie) => cookie.split('=')[0]);
+
+    it('gives refresh its own limiter so it never consumes the strict login bucket', async () => {
+      const { app, config } = createFixture({
+        rateLimit: { auth: { max: 2 }, refresh: { max: 3 } },
+      });
+      const agent = request.agent(app);
+      const csrfToken = await csrf(agent);
+
+      // Strict bucket: 1 of 2 used.
+      await post(agent, '/api/auth/register', csrfToken)
+        .send({
+          name: 'Persona Demo',
+          email: 'limits@example.com',
+          password,
+          ...privacyFields,
+        })
+        .expect(201);
+
+      // More refreshes than the strict limit allows.
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await post(agent, '/api/auth/refresh', csrfToken).expect(200);
+      }
+
+      const limited = await post(agent, '/api/auth/refresh', csrfToken).expect(429);
+      expect(limited.body.code).toBe('AUTH_REFRESH_RATE_LIMIT_EXCEEDED');
+      // A throttled refresh must not destroy the session cookies.
+      expect(clearedCookieNames(limited)).toEqual([]);
+      await agent.get('/api/auth/me').set('Origin', origin).expect(200);
+
+      // Strict bucket still has room for a login: refreshes did not count.
+      await post(agent, '/api/auth/login', csrfToken)
+        .send({ email: 'limits@example.com', password })
+        .expect(200);
+      expect(config.rateLimit.auth.max).toBe(2);
+    });
+
+    it('uses a generous default refresh limit when none is configured', async () => {
+      const { app } = createFixture({ rateLimit: { auth: { max: 1 } } });
+      const agent = request.agent(app);
+      const csrfToken = await csrf(agent);
+
+      await post(agent, '/api/auth/register', csrfToken)
+        .send({
+          name: 'Persona Demo',
+          email: 'default-limit@example.com',
+          password,
+          ...privacyFields,
+        })
+        .expect(201);
+
+      for (let attempt = 0; attempt < 15; attempt += 1) {
+        await post(agent, '/api/auth/refresh', csrfToken).expect(200);
+      }
+    });
+
+    it('keeps cookies when refresh fails for a transient server error', async () => {
+      const { app, config, prisma } = createFixture();
+      const session = await registerWithCookies(app, config);
+      const originalTransaction = prisma.$transaction;
+      prisma.$transaction = async () => {
+        throw new Error('database unavailable');
+      };
+
+      const failed = await request(app)
+        .post('/api/auth/refresh')
+        .set('Origin', origin)
+        .set('X-CSRF-Token', session.csrfToken)
+        .set('Cookie', [session.csrfCookie, session.refreshCookie])
+        .expect(500);
+      expect(clearedCookieNames(failed)).toEqual([]);
+
+      prisma.$transaction = originalTransaction;
+      await request(app)
+        .post('/api/auth/refresh')
+        .set('Origin', origin)
+        .set('X-CSRF-Token', session.csrfToken)
+        .set('Cookie', [session.csrfCookie, session.refreshCookie])
+        .expect(200);
+    });
+
+    it('logs out with only the refresh cookie when the access token expired', async () => {
+      const { app, config, prisma } = createFixture();
+      const session = await registerWithCookies(app, config);
+
+      const response = await request(app)
+        .post('/api/auth/logout')
+        .set('Origin', origin)
+        .set('X-CSRF-Token', session.csrfToken)
+        .set('Cookie', [
+          session.csrfCookie,
+          session.refreshCookie,
+          `${config.cookies.authName}=expired-or-garbage`,
+        ])
+        .expect(200);
+
+      expect(response.body.data).toEqual({ loggedOut: true });
+      expect(clearedCookieNames(response)).toEqual(
+        expect.arrayContaining([config.cookies.authName, config.cookies.refreshName]),
+      );
+      expect(prisma.state.sessions).toHaveLength(1);
+      expect(prisma.state.sessions[0]).toMatchObject({
+        revocationReason: 'LOGOUT',
+      });
+      expect(prisma.state.sessions[0].revokedAt).toBeInstanceOf(Date);
+      expect(
+        prisma.state.auditLogs.filter((entry) => entry.action === 'LOGOUT'),
+      ).toHaveLength(1);
+
+      // The revoked refresh token can no longer be used.
+      await request(app)
+        .post('/api/auth/refresh')
+        .set('Origin', origin)
+        .set('X-CSRF-Token', session.csrfToken)
+        .set('Cookie', [session.csrfCookie, session.refreshCookie])
+        .expect(401);
+    });
+
+    it('still logs out with a valid access token only', async () => {
+      const { app, config, prisma } = createFixture();
+      const session = await registerWithCookies(app, config);
+
+      await request(app)
+        .post('/api/auth/logout')
+        .set('Origin', origin)
+        .set('X-CSRF-Token', session.csrfToken)
+        .set('Cookie', [session.csrfCookie, session.accessCookie])
+        .expect(200);
+
+      expect(prisma.state.sessions[0].revocationReason).toBe('LOGOUT');
+    });
+
+    it('answers success and clears cookies even without any session', async () => {
+      const { app, config, prisma } = createFixture();
+      const session = await registerWithCookies(app, config);
+
+      const response = await request(app)
+        .post('/api/auth/logout')
+        .set('Origin', origin)
+        .set('X-CSRF-Token', session.csrfToken)
+        .set('Cookie', [session.csrfCookie])
+        .expect(200);
+
+      expect(response.body.data).toEqual({ loggedOut: true });
+      expect(clearedCookieNames(response)).toEqual(
+        expect.arrayContaining([config.cookies.authName, config.cookies.refreshName]),
+      );
+      expect(prisma.state.sessions[0].revokedAt).toBeNull();
+    });
+
+    it('does not revoke a session with an old, already rotated refresh token', async () => {
+      const { app, config, prisma } = createFixture();
+      const session = await registerWithCookies(app, config);
+      const rotated = await request(app)
+        .post('/api/auth/refresh')
+        .set('Origin', origin)
+        .set('X-CSRF-Token', session.csrfToken)
+        .set('Cookie', [session.csrfCookie, session.refreshCookie])
+        .expect(200);
+      const currentRefresh = cookiePair(
+        rotated.headers['set-cookie'],
+        config.cookies.refreshName,
+      );
+
+      await request(app)
+        .post('/api/auth/logout')
+        .set('Origin', origin)
+        .set('X-CSRF-Token', session.csrfToken)
+        .set('Cookie', [session.csrfCookie, session.refreshCookie])
+        .expect(200);
+
+      const active = prisma.state.sessions.filter((entry) => entry.revokedAt === null);
+      expect(active).toHaveLength(1);
+      await request(app)
+        .post('/api/auth/refresh')
+        .set('Origin', origin)
+        .set('X-CSRF-Token', session.csrfToken)
+        .set('Cookie', [session.csrfCookie, currentRefresh])
+        .expect(200);
+    });
+
+    it('keeps CSRF protection on logout', async () => {
+      const { app, config } = createFixture();
+      const session = await registerWithCookies(app, config);
+
+      const response = await request(app)
+        .post('/api/auth/logout')
+        .set('Origin', origin)
+        .set('Cookie', [session.csrfCookie, session.refreshCookie])
+        .expect(403);
+
+      expect(response.body.code).toBe('CSRF_TOKEN_INVALID');
+    });
+  });
 });

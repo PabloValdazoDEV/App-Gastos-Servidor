@@ -462,6 +462,22 @@ export const createHouseholdDomainRouter = ({
     }),
   );
 
+  router.post(
+    '/households/:householdId/categories/:categoryId/restore',
+    requireCsrf,
+    asyncRoute(async (request, response) => {
+      const { params } = parseRequest(request, {
+        params: categoryParamsSchema,
+        body: emptyBodySchema,
+      });
+      const category = await domain.categories.restore({
+        actorUserId: getAuthenticatedUserId(request),
+        ...params,
+      });
+      sendSuccess(response, category);
+    }),
+  );
+
   router.delete(
     '/households/:householdId/categories/:categoryId',
     requireCsrf,

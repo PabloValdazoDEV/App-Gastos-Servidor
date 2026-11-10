@@ -46,7 +46,8 @@ export function registerBudgetMarginPreferenceRoutes({ router, prisma, requireCs
     const body = budgetMarginPreferenceSchema.parse(request.body);
     const preference = await runSerializableTransaction(prisma, async (database) => {
       const access = await memberAccess(database, request);
-      await requireHouseholdCategory(database, { householdId, categoryId: body.categoryId });
+      // Groups of an archived category still have history and a forecast line.
+      await requireHouseholdCategory(database, { householdId, categoryId: body.categoryId, includeArchived: true });
       if (body.scope === 'PERSONAL') {
         const person = await requireHouseholdPerson(database, { householdId, personId: body.personalPersonId });
         if (!person.isActive || person.linkedUserId !== request.auth.userId) {

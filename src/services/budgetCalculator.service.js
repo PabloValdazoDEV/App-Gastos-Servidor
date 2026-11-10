@@ -183,24 +183,35 @@ export function calculateVariableStatistics(
     householdMarginBps,
   });
 
+  // First month of use: nothing has closed yet. What is already recorded this
+  // month is a provisional estimate, better than budgeting 0 €.
+  const currentMonth = variableMonths.find(
+    (item) => calendarMonthIndex(item.year, item.month) === calculationMonthIndex,
+  );
+  const currentRecordedCents = currentMonth ? variableMonthTotalCents(currentMonth) : 0;
+  const provisionalBase = currentRecordedCents > 0 ? currentRecordedCents : null;
+
   if (completed.length === 0) {
     return {
       completedMonths: 0,
       historicalAverageCents: null,
-      baseCents: null,
+      baseCents: provisionalBase,
+      provisional: provisionalBase !== null,
       latestMonth: null,
       averages: { months3: null, months6: null, months12: null },
       availableMonths: { months3: 0, months6: 0, months12: 0 },
-      recommendedCents: null,
+      recommendedCents: provisionalBase === null ? null : applyMarginCents(provisionalBase, margin.effectiveMarginBps),
       ...margin,
     };
   }
 
   const latest = completed.at(-1);
-  const latestIndex = calendarMonthIndex(latest.year, latest.month);
+  // Windows count back from the month being calculated, not from the last
+  // saved month: history older than 12 months no longer drives the budget
+  // (a category with data only from 2024 must not keep adding money in 2026).
   const calculateWindow = (windowMonths) => {
     const selected = completed.filter(
-      (item) => latestIndex - calendarMonthIndex(item.year, item.month) < windowMonths,
+      (item) => calculationMonthIndex - calendarMonthIndex(item.year, item.month) <= windowMonths,
     );
     const total = selected.reduce((sum, item) => sum + item.totalCents, 0);
     return {
@@ -211,12 +222,14 @@ export function calculateVariableStatistics(
   const months3 = calculateWindow(3);
   const months6 = calculateWindow(6);
   const months12 = calculateWindow(12);
-  const base = months3.averageCents ?? months6.averageCents ?? months12.averageCents;
+  const historyBase = months3.averageCents ?? months6.averageCents ?? months12.averageCents;
+  const base = historyBase ?? provisionalBase;
 
   return {
     completedMonths: completed.length,
     historicalAverageCents: roundDivide(completed.reduce((sum, month) => sum + month.totalCents, 0), completed.length),
     baseCents: base,
+    provisional: historyBase === null && base !== null,
     latestMonth: `${latest.year}-${String(latest.month).padStart(2, '0')}`,
     averages: {
       months3: months3.averageCents,

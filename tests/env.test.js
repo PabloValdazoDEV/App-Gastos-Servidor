@@ -31,6 +31,13 @@ describe('loadEnv', () => {
     expect(config.features.googleAuth).toBe(false);
   });
 
+  it('refuses to start without NODE_ENV instead of silently running as development', () => {
+    const withoutNodeEnv = validEnvironment();
+    delete withoutNodeEnv.NODE_ENV;
+    expect(() => loadEnv(withoutNodeEnv)).toThrow(EnvironmentValidationError);
+    expect(() => loadEnv(withoutNodeEnv)).toThrow(/NODE_ENV/);
+  });
+
   it('trims, canonicalizes, and deduplicates exact CORS origins', () => {
     const config = loadEnv(
       validEnvironment({

@@ -102,6 +102,20 @@ describe('API de recurrentes por semanas', () => {
     expect(response.body.data).toMatchObject({ frequency: 'MONTHLY', intervalWeeks: null, intervalMonths: null, usualDayOfMonth: 17 });
   });
 
+  it('se puede editar un gasto aunque su categoría esté archivada, si no se cambia la categoría', async () => {
+    const { app, database } = fixture({ frequency: 'MONTHLY', intervalWeeks: null, usualDayOfMonth: 17 });
+    database.category.findFirst.mockResolvedValue(null); // archived: no longer found as active
+    const response = await request(app).patch(`${path}/${expenseId}`).send({ name: 'Gimnasio nuevo' }).expect(200);
+    expect(response.body.data.name).toBe('Gimnasio nuevo');
+    expect(database.category.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('cambiar a una categoría archivada sigue sin estar permitido', async () => {
+    const { app, database } = fixture({ frequency: 'MONTHLY', intervalWeeks: null, usualDayOfMonth: 17 });
+    database.category.findFirst.mockResolvedValue(null);
+    await request(app).patch(`${path}/${expenseId}`).send({ categoryId: '30000000-0000-4000-8000-000000000099' }).expect(404);
+  });
+
   it('al mover la fecha de un mensual del día 31 al 5, el día habitual pasa a ser el 5', async () => {
     const { app } = fixture({
       frequency: 'MONTHLY', intervalWeeks: null, usualDayOfMonth: 31,

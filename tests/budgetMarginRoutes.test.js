@@ -30,9 +30,11 @@ function fixture() {
     id: id(10 + index), householdId, categoryId, category, ...scope,
     amountCents: 10_000, periodStart: '2026-01-01', periodEnd: '2026-01-31',
   }));
+  // Last closed month: history older than 12 months no longer counts.
+  const lastMonth = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth() - 1, 1));
   const months = scopeRows.map((scope, index) => ({
     id: id(20 + index), householdId, categoryId, category, ...scope,
-    year: 2020, month: 1, entryMode: 'SUMMARY', summaryAmountCents: 10_000,
+    year: lastMonth.getUTCFullYear(), month: lastMonth.getUTCMonth() + 1, entryMode: 'SUMMARY', summaryAmountCents: 10_000,
   }));
   const database = {
     householdUserAccess: { findFirst: vi.fn(({ where }) => Promise.resolve(where.householdId === householdId ? { role: 'MEMBER', household } : null)) },
@@ -119,7 +121,8 @@ describe('API de preferencias de margen', () => {
   it('rechaza categorías de otro hogar antes de escribir', async () => {
     const { app, database } = fixture();
     await request(app).put(route).send({ ...common, categoryId: id(99) }).expect(404);
-    expect(database.category.findFirst).toHaveBeenCalledWith({ where: { id: id(99), householdId, archivedAt: null } });
+    // Archived categories are accepted (their groups keep history), other households never.
+    expect(database.category.findFirst).toHaveBeenCalledWith({ where: { id: id(99), householdId } });
     expect(database.budgetMarginPreference.upsert).not.toHaveBeenCalled();
   });
 

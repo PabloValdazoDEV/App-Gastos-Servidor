@@ -171,7 +171,9 @@ const isoDate = z
 
 const envSchema = z
   .object({
-    NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+    // Required on purpose: a missing value used to fall back to development,
+    // which disables CSRF and rate limits and accepts simulated dates.
+    NODE_ENV: z.enum(['development', 'test', 'production']),
     PORT: envInteger(z.number().min(1).max(65_535), 3000),
     APP_NAME: z.string().trim().min(1).default('BudgetApp'),
     SERVER_URL: httpOrigin.default('http://localhost:3000'),

@@ -9,6 +9,7 @@ import {
 import {
   createAuthAccountRateLimiter,
   createAuthRateLimiter,
+  createAuthRefreshRateLimiter,
 } from '../middleware/rateLimit.js';
 import { validate } from '../middleware/validate.js';
 import { createAuthService } from '../services/auth.service.js';
@@ -59,10 +60,13 @@ export const createAuthRouter = ({
     suppliedRequireCsrf ?? createCsrfProtection({ config });
   const rateLimits =
     config.nodeEnv === 'development'
-      ? { account: [], strict: [] }
+      ? { account: [], strict: [], refresh: [] }
       : {
           account: [createAuthAccountRateLimiter(config.rateLimit.auth)],
           strict: [createAuthRateLimiter(config.rateLimit.auth)],
+          // Separate bucket: automatic refreshes from several tabs/devices on
+          // the same IP must not exhaust the brute-force limiter (or vice versa).
+          refresh: [createAuthRefreshRateLimiter(config.rateLimit.refresh)],
         };
 
   router.get('/csrf', createCsrfTokenHandler({ config }));
@@ -84,11 +88,14 @@ export const createAuthRouter = ({
   );
   router.post(
     '/refresh',
-    ...rateLimits.strict,
+    ...rateLimits.refresh,
     requireCsrf,
     controller.refresh,
   );
-  router.post('/logout', requireCsrf, authenticate, controller.logout);
+  // No `authenticate`: logout must also work when the access token has already
+  // expired. The controller revokes the session identified by the refresh
+  // cookie and/or a still-valid access token and always clears the cookies.
+  router.post('/logout', requireCsrf, controller.logout);
   router.post('/logout-all', requireCsrf, authenticate, controller.logoutAll);
   router.get('/me', authenticate, controller.me);
   router.get('/sessions', authenticate, controller.sessions);

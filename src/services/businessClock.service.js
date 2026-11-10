@@ -9,7 +9,17 @@ export function withBusinessDate(date, operation) {
   return businessDateContext.run(toCivilDate(date), operation);
 }
 
-export function businessToday(timezone = 'UTC', now) {
+// "Today" without a household timezone used to be the UTC date: from midnight
+// to 01:00/02:00 in Spain the app still showed the previous day (and on the
+// 1st, the previous month). The server sets this from DEFAULT_TIMEZONE.
+let defaultTimezone = 'UTC';
+
+export function setDefaultBusinessTimezone(timezone) {
+  new Intl.DateTimeFormat('en-CA', { timeZone: timezone });
+  defaultTimezone = timezone;
+}
+
+export function businessToday(timezone = defaultTimezone, now) {
   const override = businessDateContext.getStore();
   if (override && now === undefined) return new Date(override);
   const parts = new Intl.DateTimeFormat('en-CA', {

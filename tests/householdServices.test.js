@@ -271,6 +271,43 @@ describe('household domain services', () => {
       recurringExpense: { count: vi.fn().mockResolvedValue(1) },
       utilityInvoice: { count: vi.fn().mockResolvedValue(0) },
       variableExpenseMonth: { count: vi.fn().mockResolvedValue(0) },
+      oneTimeExpense: { count: vi.fn().mockResolvedValue(2) },
+    };
+    const prisma = transactionPrisma(transaction);
+    const service = createCategoriesService({ prisma });
+
+    await expect(
+      service.remove({
+        actorUserId: ids.owner,
+        householdId: ids.household,
+        categoryId: ids.category,
+      }),
+    ).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'CATEGORY_HAS_DEPENDENCIES',
+    });
+    expect(transaction.category.delete).not.toHaveBeenCalled();
+  });
+
+  it('rechaza borrar una categoría que solo tiene gastos puntuales (antes daba error 500)', async () => {
+    const transaction = {
+      householdUserAccess: {
+        findFirst: vi.fn().mockResolvedValue({
+          role: 'OWNER',
+          household: { id: ids.household, ownerUserId: ids.owner },
+        }),
+      },
+      category: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: ids.category,
+          householdId: ids.household,
+        }),
+        delete: vi.fn(),
+      },
+      recurringExpense: { count: vi.fn().mockResolvedValue(0) },
+      utilityInvoice: { count: vi.fn().mockResolvedValue(0) },
+      variableExpenseMonth: { count: vi.fn().mockResolvedValue(0) },
+      oneTimeExpense: { count: vi.fn().mockResolvedValue(2) },
     };
     const prisma = transactionPrisma(transaction);
     const service = createCategoriesService({ prisma });

@@ -81,14 +81,31 @@ export const createAuthController = ({
       setSessionCookies(response, config, authService, result.session);
       return sendSuccess(response, { user: result.user });
     } catch (error) {
-      clearAuthCookies(response, config);
+      // Only drop the cookies when the session itself was rejected (4xx).
+      // A transient server/database failure must not log the user out.
+      if (error instanceof AppError && error.statusCode < 500) {
+        clearAuthCookies(response, config);
+      }
       next(error);
     }
   },
 
   logout: async (request, response) => {
-    await authService.logout(request.auth, requestContext(request));
-    clearAuthCookies(response, config);
+    const cookies = parseCookies(request.get('cookie'));
+
+    try {
+      await authService.logout(
+        {
+          accessToken: cookies[config.cookies.authName],
+          refreshToken: cookies[config.cookies.refreshName],
+        },
+        requestContext(request),
+      );
+    } finally {
+      // Always clear the browser cookies, even if there was no session left.
+      clearAuthCookies(response, config);
+    }
+
     return sendSuccess(response, { loggedOut: true });
   },
 

@@ -296,18 +296,86 @@ export const createAuthService = ({ prisma, config, emailService, logger }) => {
       };
     },
 
-    async logout({ userId, sessionId }, requestContext) {
-      await prisma.$transaction(async (tx) => {
-        await tx.refreshSession.updateMany({
-          where: { id: sessionId, userId, revokedAt: null },
-          data: { revokedAt: new Date(), revocationReason: 'LOGOUT' },
-        });
-        await createAudit(tx, {
-          userId,
-          action: 'LOGOUT',
-          requestContext,
-          metadata: { scope: 'current_session' },
-        });
+    /**
+     * Revokes the current session using whatever credentials the browser still
+     * has. Works without a valid access token (it may have expired): the
+     * refresh cookie alone identifies the session. Invalid/expired tokens are
+     * ignored, so logging out never fails because the session is already gone.
+     */
+    async logout({ accessToken, refreshToken } = {}, requestContext) {
+      const targets = [];
+      const addTarget = (target) => {
+        if (
+          typeof target.userId !== 'string' ||
+          typeof target.sessionId !== 'string'
+        ) {
+          return;
+        }
+
+        const alreadyTargeted = targets.some(
+          (entry) =>
+            entry.sessionId === target.sessionId &&
+            entry.userId === target.userId,
+        );
+
+        // A valid access token for the same session is already enough proof.
+        if (!alreadyTargeted) targets.push(target);
+      };
+
+      if (accessToken) {
+        try {
+          const payload = await tokens.verifyAccess(accessToken);
+          addTarget({ userId: payload.sub, sessionId: payload.sessionId });
+        } catch {
+          // Expired or invalid access token: rely on the refresh cookie.
+        }
+      }
+
+      if (refreshToken) {
+        try {
+          const payload = await tokens.verifyRefresh(refreshToken);
+          addTarget({
+            userId: payload.sub,
+            sessionId: payload.sessionId,
+            tokenHash: sha256(refreshToken),
+          });
+        } catch {
+          // Expired or invalid refresh token: nothing left to revoke.
+        }
+      }
+
+      if (targets.length === 0) return { revoked: false };
+
+      return prisma.$transaction(async (tx) => {
+        const now = new Date();
+        const revokedUserIds = new Set();
+
+        for (const target of targets) {
+          const result = await tx.refreshSession.updateMany({
+            where: {
+              id: target.sessionId,
+              userId: target.userId,
+              revokedAt: null,
+              // The refresh cookie only revokes the session it was issued for
+              // in its current rotation; an old rotated token matches nothing.
+              ...(target.tokenHash ? { tokenHash: target.tokenHash } : {}),
+            },
+            data: { revokedAt: now, revocationReason: 'LOGOUT' },
+          });
+
+          if (result.count > 0) revokedUserIds.add(target.userId);
+        }
+
+        for (const userId of revokedUserIds) {
+          await createAudit(tx, {
+            userId,
+            action: 'LOGOUT',
+            requestContext,
+            metadata: { scope: 'current_session' },
+          });
+        }
+
+        return { revoked: revokedUserIds.size > 0 };
       });
     },
 

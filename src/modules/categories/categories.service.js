@@ -166,6 +166,39 @@ export const createCategoriesService = ({ prisma }) => {
       });
     },
 
+    // Undo an archive. Same permission as archiving (ADMIN+). The slug is
+    // unique per household, so restoring is the only way to reuse it.
+    async restore({ actorUserId, householdId, categoryId }) {
+      return runSerializableTransaction(prisma, async (tx) => {
+        await requireHouseholdRole(tx, {
+          householdId,
+          userId: actorUserId,
+          minimumRole: HOUSEHOLD_ROLES.ADMIN,
+        });
+        const existing = await requireHouseholdCategory(tx, {
+          householdId,
+          categoryId,
+          includeArchived: true,
+        });
+        if (!existing.archivedAt) return existing;
+
+        const category = await tx.category.update({
+          where: { id: categoryId },
+          data: { archivedAt: null },
+        });
+
+        await auditCategory(tx, {
+          actorUserId,
+          householdId,
+          categoryId,
+          action: 'CATEGORY_CHANGED',
+          operation: 'RESTORED',
+        });
+
+        return category;
+      });
+    },
+
     async remove({ actorUserId, householdId, categoryId }) {
       return runSerializableTransaction(prisma, async (tx) => {
         await requireHouseholdRole(tx, {
@@ -178,14 +211,18 @@ export const createCategoriesService = ({ prisma }) => {
           categoryId,
           includeArchived: true,
         });
-        const [recurringExpenses, utilityInvoices, variableMonths] =
+        // Every Category relation with onDelete: Restrict must be counted
+        // here; otherwise the delete fails with an unmapped P2003 (500).
+        // BudgetMarginPreference cascades and is not a dependency.
+        const [recurringExpenses, utilityInvoices, variableMonths, oneTimeExpenses] =
           await Promise.all([
             tx.recurringExpense.count({ where: { categoryId, householdId } }),
             tx.utilityInvoice.count({ where: { categoryId, householdId } }),
             tx.variableExpenseMonth.count({ where: { categoryId, householdId } }),
+            tx.oneTimeExpense.count({ where: { categoryId, householdId } }),
           ]);
         const dependencyCount =
-          recurringExpenses + utilityInvoices + variableMonths;
+          recurringExpenses + utilityInvoices + variableMonths + oneTimeExpenses;
 
         assertDomain(
           dependencyCount === 0,
@@ -197,6 +234,7 @@ export const createCategoriesService = ({ prisma }) => {
               recurringExpenses,
               utilityInvoices,
               variableExpenseMonths: variableMonths,
+              oneTimeExpenses,
             },
           ],
         );

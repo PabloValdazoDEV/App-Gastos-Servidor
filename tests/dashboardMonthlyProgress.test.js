@@ -158,7 +158,9 @@ describe('Dashboard monthly progress integration', () => {
       invoiceDate: day('2026-08-31'), chargeDate: day('2026-09-20') });
     const result = await read();
     expect(result.monthlyProgress.common.usedCents).toBe(58_000);
-    expect(result.budget.lines.find((line) => line.type === 'VARIABLE')).toBeUndefined();
+    // First month of a category: what is already recorded is a provisional
+    // estimate instead of budgeting 0 €.
+    expect(result.budget.lines.find((line) => line.type === 'VARIABLE')).toMatchObject({ baseCents: 18_000 });
   });
 
   it('feeds the overview with the real historical average and only the unregistered remainder', async () => {

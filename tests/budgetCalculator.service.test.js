@@ -200,3 +200,34 @@ describe('budgetCalculator.service', () => {
     expect(statistics.latestMonth).toBe('2026-07');
   });
 });
+
+describe('previsión de gastos variables anclada a la fecha de cálculo', () => {
+  const summary = (year, month, cents) => ({ year, month, entryMode: 'SUMMARY', summaryAmountCents: cents });
+
+  it('una categoría con datos solo de 2024 ya no suma en noviembre de 2026', () => {
+    const stats = calculateVariableStatistics(
+      [summary(2024, 3, 40_000), summary(2024, 4, 40_000)],
+      { calculationDate: '2026-11-10' },
+    );
+    expect(stats.baseCents).toBeNull();
+    expect(stats.recommendedCents).toBeNull();
+  });
+
+  it('usa los meses cerrados de los últimos 3 meses contados desde el mes de cálculo', () => {
+    const stats = calculateVariableStatistics(
+      [summary(2026, 8, 30_000), summary(2026, 9, 32_000), summary(2026, 10, 34_000)],
+      { calculationDate: '2026-11-10' },
+    );
+    expect(stats.averages.months3).toBe(32_000);
+    expect(stats.provisional).toBe(false);
+  });
+
+  it('el primer mes de uso cuenta lo ya apuntado como estimación provisional, no 0 €', () => {
+    const stats = calculateVariableStatistics(
+      [summary(2026, 11, 12_500)],
+      { calculationDate: '2026-11-10' },
+    );
+    expect(stats.baseCents).toBe(12_500);
+    expect(stats.provisional).toBe(true);
+  });
+});

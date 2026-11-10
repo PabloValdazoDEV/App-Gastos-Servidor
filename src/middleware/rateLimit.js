@@ -63,3 +63,33 @@ export const createAuthAccountRateLimiter = ({ windowMs, max }) =>
       );
     },
   });
+
+// /auth/refresh is called automatically by every open tab/device roughly once
+// per access-token lifetime (15 min). Several devices of one household share
+// the same public IP, so it needs its own, much more generous bucket instead
+// of sharing the brute-force limiter used by login/register/recovery.
+export const DEFAULT_AUTH_REFRESH_RATE_LIMIT = Object.freeze({
+  windowMs: 15 * 60 * 1_000,
+  max: 120,
+});
+
+export const createAuthRefreshRateLimiter = ({
+  windowMs = DEFAULT_AUTH_REFRESH_RATE_LIMIT.windowMs,
+  max = DEFAULT_AUTH_REFRESH_RATE_LIMIT.max,
+} = {}) =>
+  rateLimit({
+    windowMs,
+    limit: max,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    handler(_request, _response, next) {
+      next(
+        new AppError({
+          statusCode: 429,
+          code: 'AUTH_REFRESH_RATE_LIMIT_EXCEEDED',
+          message:
+            'Se han realizado demasiadas renovaciones de sesión. Inténtalo de nuevo en unos minutos.',
+        }),
+      );
+    },
+  });

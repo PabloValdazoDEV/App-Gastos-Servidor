@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 
 import { createApp } from './src/app.js';
 import { loadEnv } from './src/config/env.js';
+import { setDefaultBusinessTimezone } from './src/services/businessClock.service.js';
 import { startReminderScheduler } from './src/jobs/reminder.scheduler.js';
 import { createLogger } from './src/lib/logger.js';
 import { createEmailService } from './src/services/email.service.js';
@@ -47,6 +48,7 @@ const bootstrap = async () => {
   dotenv.config();
 
   const config = loadEnv();
+  setDefaultBusinessTimezone(config.defaults.timezone);
   const logger = createLogger({
     level: config.logging.level,
     bindings: {

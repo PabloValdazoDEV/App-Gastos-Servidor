@@ -94,6 +94,14 @@ const getRecurringExpense = async (database, householdId, expenseId, actorUserId
   return expense;
 };
 
+// Editing an expense must keep working after its category is archived: the
+// category is validated (active, same household) only when it really changes.
+const requireChangedCategory = async (database, householdId, nextCategoryId, currentCategoryId) => {
+  if (nextCategoryId && nextCategoryId !== currentCategoryId) {
+    await requireHouseholdCategory(database, { householdId, categoryId: nextCategoryId });
+  }
+};
+
 const getInvoice = async (database, householdId, invoiceId, actorUserId) => {
   const invoice = await database.utilityInvoice.findFirst({
     where: { id: invoiceId, householdId, ...visibleExpenseWhere(actorUserId) },
@@ -298,8 +306,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
         const personalPersonId = Object.hasOwn(body, 'personalPersonId')
           ? body.personalPersonId
           : existing.personalPersonId;
-        const categoryId = body.categoryId ?? existing.categoryId;
-        await requireHouseholdCategory(database, { householdId, categoryId });
+        await requireChangedCategory(database, householdId, body.categoryId, existing.categoryId);
         await validateScope(database, householdId, scope, personalPersonId);
         const intervals = recurringIntervalsSchema.parse({
           frequency: body.frequency ?? existing.frequency,
@@ -699,9 +706,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
       const body = updateInvoiceSchema.parse(request.body);
       await memberAccess(prisma, request);
       const existing = await getInvoice(prisma, householdId, invoiceId, request.auth.userId);
-      if (body.categoryId) {
-        await requireHouseholdCategory(prisma, { householdId, categoryId: body.categoryId });
-      }
+      await requireChangedCategory(prisma, householdId, body.categoryId, existing.categoryId);
       const scope = body.scope ?? existing.scope;
       const personalPersonId = Object.hasOwn(body, 'personalPersonId')
         ? body.personalPersonId
@@ -802,7 +807,11 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
       const { householdId } = financeParamsSchema.parse(request.params);
       const body = upsertVariableMonthSchema.parse(request.body);
       await memberAccess(prisma, request);
-      await requireHouseholdCategory(prisma, { householdId, categoryId: body.categoryId });
+      const category = await requireHouseholdCategory(prisma, {
+        householdId,
+        categoryId: body.categoryId,
+        includeArchived: true,
+      });
       await validateScope(prisma, householdId, body.scope, body.personalPersonId);
       const key = ownerKey(body.scope, body.personalPersonId);
       const item = await runSerializableTransaction(prisma, async (database) => {
@@ -817,6 +826,15 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
             },
           },
         });
+        // An archived category keeps its saved months editable, but it cannot
+        // receive new months (same rule as creating any other expense).
+        if (category.archivedAt && !existing) {
+          throw createDomainError(
+            404,
+            'CATEGORY_NOT_FOUND',
+            'No se encontró la categoría solicitada en este hogar.',
+          );
+        }
         // "Añadir gasto" on a month that already has data must never replace
         // it: the new amount is added as one more entry and nothing is lost.
         if (existing && body.append) {
@@ -1076,7 +1094,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
       const personalPersonId = Object.hasOwn(body, 'personalPersonId')
         ? body.personalPersonId
         : existing.personalPersonId;
-      await requireHouseholdCategory(prisma, { householdId, categoryId });
+      await requireChangedCategory(prisma, householdId, categoryId, existing.categoryId);
       await validateScope(prisma, householdId, scope, personalPersonId);
       const { paymentDate, ...expenseFields } = body;
       const expense = await prisma.$transaction(async (database) => {
