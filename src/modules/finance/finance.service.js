@@ -8,7 +8,7 @@ import { calculateMonthlySpendingProgress } from '../../services/monthlySpending
 import { calculateMonthlyOverview } from '../../services/monthlyOverview.service.js';
 import { budgetMarginLookup } from './budgetMarginPreference.service.js';
 import { loadPurchaseFinancialSources, upcomingPurchasePayments } from './purchaseFinancialSources.js';
-import { recurringExpenseIsInEffect } from '../../services/recurrence.service.js';
+import { calculateNextDueDate, recurringExpenseIsInEffect } from '../../services/recurrence.service.js';
 import {
   calculateFinancialStatus,
   calculateSimulation,
@@ -401,6 +401,31 @@ export function upcomingPayments(recurringExpenses, calculationDate, purchaseSou
     .sort((left, right) => left.dueDate.localeCompare(right.dueDate));
 }
 
+const MAX_PENDING_DUE_DATES = 24;
+
+/*
+ * Every unpaid occurrence of a recurring expense up to `date`, oldest first.
+ * Lets Home group "3 months overdue" in one row and pay them in order (the
+ * payment route only accepts the current nextDueDate). A future due date
+ * returns just itself.
+ */
+export function pendingDueDates(expense, date) {
+  const first = toCivilDate(expense.nextDueDate);
+  const dates = [toIsoDate(first)];
+  if (!expense.frequency || expense.frequency === 'ONE_TIME') return dates;
+  const end = expense.endDate ? toCivilDate(expense.endDate) : null;
+  let current = first;
+  while (dates.length < MAX_PENDING_DUE_DATES) {
+    const next = calculateNextDueDate(
+      current, expense.frequency, expense.intervalMonths, expense.usualDayOfMonth, expense.intervalWeeks,
+    );
+    if (!next || next > date || (end && next > end)) break;
+    dates.push(toIsoDate(next));
+    current = next;
+  }
+  return dates;
+}
+
 export function dashboardDuePayments(recurringExpenses, calculationDate, daysAhead = 5, purchaseSources = []) {
   const date = toCivilDate(calculationDate);
   const horizon = new Date(date);
@@ -418,6 +443,7 @@ export function dashboardDuePayments(recurringExpenses, calculationDate, daysAhe
       expenseId: expense.id,
       name: expense.name,
       dueDate: toIsoDate(expense.nextDueDate),
+      pendingDueDates: pendingDueDates(expense, date),
       amountCents: expense.amountCents,
       scope: expense.scope,
       category: expense.category,

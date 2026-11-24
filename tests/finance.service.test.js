@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   dashboardDuePayments,
+  pendingDueDates,
   personalAccountRequiredCents,
   planningMatchesBudget,
   rebasePlanningToBudget,
@@ -44,6 +45,31 @@ describe('dashboardDuePayments', () => {
     );
 
     expect(payments.map((payment) => payment.expenseId)).toEqual(['late', 'today', 'near']);
+  });
+});
+
+describe('pendingDueDates', () => {
+  it('lista todos los vencimientos sin pagar hasta hoy, del más antiguo al más reciente', () => {
+    const expense = { nextDueDate: '2026-09-05', frequency: 'MONTHLY', usualDayOfMonth: 5 };
+    expect(pendingDueDates(expense, new Date('2026-11-24T00:00:00Z'))).toEqual(['2026-09-05', '2026-10-05', '2026-11-05']);
+  });
+
+  it('incluye el vencimiento de hoy y se detiene en la fecha de fin', () => {
+    const expense = { nextDueDate: '2026-09-24', frequency: 'MONTHLY', usualDayOfMonth: 24, endDate: '2026-10-31' };
+    expect(pendingDueDates(expense, new Date('2026-11-24T00:00:00Z'))).toEqual(['2026-09-24', '2026-10-24']);
+  });
+
+  it('un vencimiento futuro solo se devuelve a sí mismo', () => {
+    const expense = { nextDueDate: '2026-11-28', frequency: 'WEEKLY' };
+    expect(pendingDueDates(expense, new Date('2026-11-24T00:00:00Z'))).toEqual(['2026-11-28']);
+  });
+
+  it('dashboardDuePayments añade los vencimientos pendientes a cada gasto', () => {
+    const [payment] = dashboardDuePayments(
+      [{ id: 'gym', name: 'Gimnasio', amountCents: 3_500, nextDueDate: '2026-10-03', frequency: 'MONTHLY', usualDayOfMonth: 3, scope: 'PERSONAL' }],
+      '2026-11-24',
+    );
+    expect(payment.pendingDueDates).toEqual(['2026-10-03', '2026-11-03']);
   });
 });
 
