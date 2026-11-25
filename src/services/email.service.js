@@ -1,12 +1,6 @@
 import nodemailer from 'nodemailer';
 
-const escapeHtml = (value) =>
-  String(value)
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#039;');
+import { renderEmail } from './emailTemplates.js';
 
 const sanitizeHeaderValue = (value) =>
   [...String(value)]
@@ -47,7 +41,15 @@ export const createEmailService = ({ config, logger, transport }) => {
       if (!mailTransport) return false;
 
       const resetUrl = `${config.app.clientUrl}/reset-password#token=${encodeURIComponent(token)}`;
-      const safeName = escapeHtml(name);
+      const { html, text } = renderEmail({
+        preheader: 'Crea una contraseña nueva para tu cuenta.',
+        eyebrow: 'Tu cuenta',
+        heading: 'Restablece tu contraseña',
+        intro: `Hola ${name}, pulsa el botón para crear una contraseña nueva.`,
+        cta: { label: 'Crear contraseña nueva', url: resetUrl },
+        outro: 'Si no solicitaste este cambio, ignora este mensaje: tu contraseña actual sigue funcionando.',
+        footer: { text: 'Si no lo ves en tu bandeja de entrada, revisa la carpeta de spam o correo no deseado.' },
+      });
 
       await mailTransport.sendMail({
         from: {
@@ -56,17 +58,8 @@ export const createEmailService = ({ config, logger, transport }) => {
         },
         to: sanitizeHeaderValue(recipient),
         subject: 'Restablece tu contraseña de BudgetApp',
-        text:
-          `Hola ${name},\n\n` +
-          `Abre este enlace para crear una nueva contraseña:\n${resetUrl}\n\n` +
-          'Si no lo ves en tu bandeja de entrada, revisa la carpeta de spam o correo no deseado.\n\n' +
-          'Si no solicitaste este cambio, ignora este mensaje.',
-        html:
-          `<p>Hola ${safeName},</p>` +
-          '<p>Abre el siguiente enlace para crear una nueva contraseña:</p>' +
-          `<p><a href="${escapeHtml(resetUrl)}">Restablecer contraseña</a></p>` +
-          '<p>Si no lo ves en tu bandeja de entrada, revisa la carpeta de spam o correo no deseado.</p>' +
-          '<p>Si no solicitaste este cambio, ignora este mensaje.</p>',
+        text,
+        html,
         disableFileAccess: true,
         disableUrlAccess: true,
       });
@@ -80,8 +73,16 @@ export const createEmailService = ({ config, logger, transport }) => {
 
       const clientUrl = String(config.app.clientUrl).replace(/\/$/, '');
       const invitationUrl = `${clientUrl}/invitaciones/aceptar#token=${encodeURIComponent(token)}`;
-      const safeHouseholdName = escapeHtml(householdName);
       const roleLabel = role === 'ADMIN' ? 'administrador' : 'miembro';
+      const { html, text } = renderEmail({
+        preheader: `Te han invitado a ${householdName} en BudgetApp.`,
+        eyebrow: 'Invitación',
+        heading: `Únete a «${householdName}»`,
+        intro: `Te han invitado a organizar los gastos del hogar «${householdName}» en BudgetApp como ${roleLabel}.`,
+        cta: { label: 'Aceptar invitación', url: invitationUrl },
+        outro: 'Si no esperabas esta invitación, puedes ignorar este mensaje.',
+        footer: { text: 'Si no lo ves en tu bandeja de entrada, revisa la carpeta de spam o correo no deseado.' },
+      });
 
       await mailTransport.sendMail({
         from: {
@@ -90,19 +91,8 @@ export const createEmailService = ({ config, logger, transport }) => {
         },
         to: sanitizeHeaderValue(recipient),
         subject: `Invitación para unirte a ${sanitizeHeaderValue(householdName)} en BudgetApp`,
-        text:
-          `Has recibido una invitación para unirte al hogar "${householdName}" ` +
-          `en BudgetApp como ${roleLabel}.\n\n` +
-          `Abre este enlace para aceptar la invitación:\n${invitationUrl}\n\n` +
-          'Si no lo ves en tu bandeja de entrada, revisa la carpeta de spam o correo no deseado.\n\n' +
-          'Si no esperabas esta invitación, puedes ignorar este mensaje.',
-        html:
-          `<p>Has recibido una invitación para unirte al hogar ` +
-          `<strong>${safeHouseholdName}</strong> en BudgetApp como ${roleLabel}.</p>` +
-          '<p>Abre el siguiente enlace para aceptar la invitación:</p>' +
-          `<p><a href="${escapeHtml(invitationUrl)}">Aceptar invitación</a></p>` +
-          '<p>Si no lo ves en tu bandeja de entrada, revisa la carpeta de spam o correo no deseado.</p>' +
-          '<p>Si no esperabas esta invitación, puedes ignorar este mensaje.</p>',
+        text,
+        html,
         disableFileAccess: true,
         disableUrlAccess: true,
       });

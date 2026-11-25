@@ -732,6 +732,9 @@ model NotificationPreference {
   emailEnabled   Boolean  @default(true)
   webPushEnabled Boolean  @default(false)
   defaultOffsets Int[]    @default([30, 7, 1])
+  // Default reminders only for payments above this amount (100 €); 0 = all.
+  // Per-expense reminder rules always apply regardless of amount.
+  minimumAmountCents Int  @default(10000)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)

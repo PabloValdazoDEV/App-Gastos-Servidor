@@ -8,6 +8,7 @@ import {
   toCivilDate,
 } from '../services/date.service.js';
 import { formatCurrency } from '../services/money.service.js';
+import { renderEmail } from '../services/emailTemplates.js';
 
 const DEFAULT_OFFSETS = Object.freeze([30, 7, 1]);
 const DEFAULT_PREFERENCE = Object.freeze({
@@ -15,6 +16,8 @@ const DEFAULT_PREFERENCE = Object.freeze({
   emailEnabled: true,
   webPushEnabled: false,
   defaultOffsets: DEFAULT_OFFSETS,
+  // Default reminders only for payments above 100 €.
+  minimumAmountCents: 10_000,
 });
 
 function channelEnabled(channel, preference, config) {
@@ -85,6 +88,10 @@ export function buildReminderCandidates(expenses, today, config) {
       const explicitRules = expense.reminderRules.filter(
         (rule) => rule.userId === access.userId,
       );
+      // Without reminders set for this expense, only payments above the
+      // user's threshold remind by default; small ones stay quiet.
+      const minimumAmountCents = preference.minimumAmountCents ?? DEFAULT_PREFERENCE.minimumAmountCents;
+      if (!explicitRules.length && expense.amountCents <= minimumAmountCents) return;
       const rules = explicitRules.length
         ? explicitRules
             .filter(
@@ -200,6 +207,38 @@ export async function createDueNotifications({ prisma, config, today = new Date(
   return { candidates: candidates.length, created, deliveriesCreated };
 }
 
+const longDate = (date) => new Intl.DateTimeFormat('es-ES', {
+  weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC',
+}).format(toCivilDate(date));
+
+// Payment reminder email: amount in big, due date, household and a button to the payment.
+export function reminderEmail(notification, config) {
+  const clientUrl = String(config.app.clientUrl).replace(/\/$/, '');
+  const expense = notification.recurringExpense;
+  const amount = expense ? formatReminderAmount(expense) : null;
+  const dueToday = notification.title?.endsWith('vence hoy');
+  return renderEmail({
+    preheader: amount ? `${notification.title} · ${amount}` : notification.title,
+    eyebrow: dueToday ? 'Vence hoy' : 'Próximo pago',
+    heading: notification.title,
+    intro: expense
+      ? `Ten el dinero preparado en la cuenta ${expense.scope === 'PERSONAL' ? 'personal' : 'conjunta'} para este pago.`
+      : notification.message,
+    highlight: amount ? { label: 'Importe previsto', value: amount } : null,
+    details: [
+      ['Vence el', notification.dueDate ? longDate(notification.dueDate) : null],
+      ['Gasto', expense?.name],
+      ['Hogar', expense?.household?.name],
+    ],
+    cta: { label: 'Ver el pago', url: `${clientUrl}${notification.relatedPath ?? '/notificaciones'}` },
+    outro: 'Cuando lo pagues, márcalo como pagado en la app y no te lo volveremos a recordar.',
+    footer: {
+      text: 'Recibes este aviso porque tienes activados los avisos por correo.',
+      link: { label: 'Cambiar mis avisos', url: `${clientUrl}/notificaciones` },
+    },
+  });
+}
+
 export async function createDeliveryAdapters(config) {
   const adapters = {
     IN_APP: async () => undefined,
@@ -212,13 +251,16 @@ export async function createDeliveryAdapters(config) {
       secure: config.email.secure,
       auth: { user: config.email.user, pass: config.email.password },
     });
-    adapters.EMAIL = async (delivery) =>
-      transporter.sendMail({
+    adapters.EMAIL = async (delivery) => {
+      const { html, text } = reminderEmail(delivery.notification, config);
+      return transporter.sendMail({
         from: `"${config.email.fromName}" <${config.email.fromAddress}>`,
         to: delivery.notification.user.email,
         subject: delivery.notification.title,
-        text: `${delivery.notification.message}\n\n${config.app.clientUrl}${delivery.notification.relatedPath ?? '/notificaciones'}`,
+        text,
+        html,
       });
+    };
   }
 
   if (config.features.webPush) {
@@ -282,7 +324,12 @@ export async function processPendingDeliveries({
     },
     include: {
       notification: {
-        include: { user: { include: { pushSubscriptions: true } } },
+        include: {
+          user: { include: { pushSubscriptions: true } },
+          recurringExpense: {
+            select: { name: true, amountCents: true, scope: true, household: { select: { name: true, currency: true } } },
+          },
+        },
       },
     },
     orderBy: { createdAt: 'asc' },

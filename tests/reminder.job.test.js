@@ -98,7 +98,8 @@ describe('runReminderJob', () => {
         id: '00000000-0000-4000-8000-000000000013',
         householdId: '00000000-0000-4000-8000-000000000012',
         name: 'Gimnasio',
-        amountCents: 4000,
+        // Above the 100 € default threshold: this test is about dates.
+        amountCents: 14_000,
         frequency: 'CUSTOM_WEEKS',
         intervalWeeks: 4,
         intervalMonths: null,
@@ -146,7 +147,7 @@ describe('runReminderJob', () => {
       dueDate: nextDueDate,
       offsetDays: 7,
       title: 'Gimnasio vence en 7 días',
-      message: 'Importe previsto: 40,00 €.',
+      message: 'Importe previsto: 140,00 €.',
     });
 
     expect((await run('2026-10-08')).generation).toEqual({
@@ -240,7 +241,7 @@ function expense(overrides = {}) {
     id: '00000000-0000-4000-8000-0000000000e1',
     householdId: '00000000-0000-4000-8000-0000000000h1',
     name: 'Seguro',
-    amountCents: 4_500,
+    amountCents: 45_000,
     scope: 'HOUSEHOLD',
     personalPerson: null,
     endDate: null,
@@ -311,5 +312,34 @@ describe('buildReminderCandidates', () => {
       jobConfig,
     );
     expect(candidate).toMatchObject({ offsetDays: 1, title: 'Seguro vence en 1 día' });
+  });
+});
+
+describe('umbral de avisos por importe', () => {
+  const today = new Date('2026-11-25T09:00:00.000Z');
+
+  it('por defecto solo avisa de pagos de más de 100 €', () => {
+    const candidates = buildReminderCandidates([
+      expense({ id: 'big', name: 'Seguro', amountCents: 45_000 }),
+      expense({ id: 'gym', name: 'Gym', amountCents: 3_500 }),
+      expense({ id: 'exact', name: 'Exacto', amountCents: 10_000 }),
+    ], today, jobConfig);
+    expect([...new Set(candidates.map((candidate) => candidate.recurringExpenseId))]).toEqual(['big']);
+  });
+
+  it('cada persona puede bajar o subir su umbral', () => {
+    const accesses = [access(USER_A, { minimumAmountCents: 0 }), access(USER_B, { minimumAmountCents: 50_000 })];
+    const candidates = buildReminderCandidates(
+      [expense({ amountCents: 3_500, household: { timezone: 'Europe/Madrid', accesses } })],
+      today, jobConfig,
+    );
+    expect(candidates.map((candidate) => candidate.userId)).toEqual([USER_A]);
+  });
+
+  it('un gasto pequeño con avisos propios avisa aunque esté por debajo del umbral', () => {
+    const candidates = buildReminderCandidates([
+      expense({ amountCents: 3_500, reminderRules: [{ userId: USER_A, offsetDays: 7, channel: 'IN_APP', enabled: true }] }),
+    ], today, jobConfig);
+    expect(candidates.map((candidate) => candidate.userId)).toEqual([USER_A]);
   });
 });

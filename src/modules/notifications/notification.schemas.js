@@ -28,6 +28,7 @@ export const preferenceBodySchema = z
       .max(20)
       .transform((items) => [...new Set(items)].sort((left, right) => right - left))
       .optional(),
+    minimumAmountCents: z.number().int().min(0).max(100_000_000).optional(),
   })
   .strict()
   .refine((body) => Object.keys(body).length > 0, 'Indica alguna preferencia.');

@@ -20,6 +20,7 @@ const DEFAULT_PREFERENCE = Object.freeze({
   emailEnabled: true,
   webPushEnabled: false,
   defaultOffsets: [30, 7, 1],
+  minimumAmountCents: 10_000,
 });
 
 export const createNotificationRouter = ({ prisma, authenticate, requireCsrf }) => {
