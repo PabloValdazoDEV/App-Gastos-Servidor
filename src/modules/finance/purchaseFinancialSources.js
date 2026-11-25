@@ -91,9 +91,12 @@ export async function loadPurchaseFinancialSources(database, { householdId, acto
     { status: 'PLANNED', dueDate: pendingRange },
     { status: 'PAID', OR: [{ dueDate: range }, { paidAt: range }] },
   ] };
+  // Purchases paid upfront are now only tickets and warranties ("Garantías"),
+  // outside the monthly calculations; a big one-off belongs in "Gastos
+  // puntuales" and financing in a recurring expense with an end date. Legacy
+  // financed purchases keep their installments so existing plans do not change.
   const purchases = await database.purchase.findMany({
     where: { householdId, OR: [
-      { paymentMethod: 'UPFRONT', paymentDate: range },
       { paymentMethod: 'FINANCED', financing: { downPaymentPaidAt: range } },
       { paymentMethod: 'FINANCED', archivedAt: null, purchaseDate: pendingRange,
         financing: { downPaymentCents: { gt: 0 }, downPaymentPaidAt: null } },
