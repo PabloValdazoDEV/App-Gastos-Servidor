@@ -1,3 +1,4 @@
+import { scheduleOccurrences } from './invoiceSchedule.service.js';
 import {
   addCalendarDays,
   compareCivilDates,
@@ -83,6 +84,7 @@ export function buildCalendar({
   invoices = [],
   variableMonths = [],
   oneTimeExpenses = [],
+  invoiceForecasts = [],
   today,
   view = '30_DAYS',
   anchorDate = today,
@@ -225,7 +227,32 @@ export function buildCalendar({
       variableMonthId: month.id,
     }));
   });
-  const events = [...eventsByOccurrence.values(), ...purchaseEvents, ...invoiceEvents, ...oneTimeEvents, ...variableEvents].sort((left, right) => {
+  // Expected bills of repeating invoices: a forecast with an estimated amount,
+  // never a payment. Registering the real bill moves the next expected date.
+  const forecastEvents = invoiceForecasts.flatMap((schedule) =>
+    scheduleOccurrences(schedule, rangeStart, rangeEnd).map((date) => ({
+      id: `${schedule.id}:${date}`,
+      scheduleId: schedule.id,
+      sourceType: 'INVOICE_FORECAST',
+      name: schedule.name,
+      dueDate: date,
+      datePrecision: 'DAY',
+      dateBasis: 'EXPECTED_DATE',
+      amountCents: schedule.estimate?.amountCents ?? 0,
+      expectedAmountCents: schedule.estimate?.amountCents ?? null,
+      actualAmountCents: null,
+      paymentId: null,
+      paymentDate: null,
+      canRegisterPayment: false,
+      canEditPayment: false,
+      scope: schedule.scope,
+      personalPersonId: schedule.personalPersonId ?? null,
+      personalPerson: schedule.personalPerson ?? null,
+      category: schedule.category ?? null,
+      status: 'ESTIMATED',
+      daysFromToday: differenceInCalendarDays(date, today),
+    })));
+  const events = [...eventsByOccurrence.values(), ...purchaseEvents, ...invoiceEvents, ...oneTimeEvents, ...variableEvents, ...forecastEvents].sort((left, right) => {
     const dateComparison = left.dueDate.localeCompare(right.dueDate);
     if (dateComparison !== 0) return dateComparison;
     return (left.expenseId ?? left.id).localeCompare(right.expenseId ?? right.id);

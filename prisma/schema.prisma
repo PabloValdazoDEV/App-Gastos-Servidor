@@ -318,6 +318,7 @@ model Household {
   categories            Category[]
   recurringExpenses     RecurringExpense[]
   utilityInvoices       UtilityInvoice[]
+  invoiceSchedules      InvoiceSchedule[]
   variableExpenseMonths VariableExpenseMonth[]
   oneTimeExpenses       OneTimeExpense[]
   purchases             Purchase[]
@@ -351,6 +352,7 @@ model HouseholdPerson {
   personalPurchases      Purchase[]                    @relation("PersonalPurchase")
   purchaseShares         PurchaseShare[]
   personalInvoices       UtilityInvoice[]              @relation("PersonalInvoice")
+  personalInvoiceSchedules InvoiceSchedule[]           @relation("PersonalInvoiceSchedule")
   variableExpenseMonths  VariableExpenseMonth[]        @relation("PersonalVariableExpense")
   oneTimeExpenses        OneTimeExpense[]              @relation("PersonalOneTimeExpense")
   budgetMarginPreferences BudgetMarginPreference[]
@@ -417,6 +419,7 @@ model Category {
   household             Household              @relation(fields: [householdId], references: [id], onDelete: Restrict)
   recurringExpenses     RecurringExpense[]
   utilityInvoices       UtilityInvoice[]
+  invoiceSchedules      InvoiceSchedule[]
   variableExpenseMonths VariableExpenseMonth[]
   oneTimeExpenses       OneTimeExpense[]
   budgetMarginPreferences BudgetMarginPreference[]
@@ -499,9 +502,12 @@ model UtilityInvoice {
   household        Household         @relation(fields: [householdId], references: [id], onDelete: Restrict)
   category         Category          @relation(fields: [categoryId], references: [id], onDelete: Restrict)
   personalPerson   HouseholdPerson?  @relation("PersonalInvoice", fields: [personalPersonId], references: [id], onDelete: Restrict)
+  scheduleId       String?           @db.Uuid
+  schedule         InvoiceSchedule?  @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
   documents        InvoiceDocument[]
 
   @@index([householdId, categoryId, periodEnd])
+  @@index([scheduleId])
   @@index([householdId, chargeDate])
   @@index([personalPersonId])
 }
@@ -1014,4 +1020,33 @@ model AuditLog {
   @@index([householdId, createdAt])
   @@index([actorUserId, createdAt])
   @@index([action, createdAt])
+}
+
+// A bill that repeats (electricity every 2 months around the 10th…). The
+// expected bill is a forecast with an estimated amount; the real one is a
+// UtilityInvoice linked by scheduleId, which moves nextExpectedDate forward.
+model InvoiceSchedule {
+  id               String           @id @default(uuid()) @db.Uuid
+  householdId      String           @db.Uuid
+  categoryId       String           @db.Uuid
+  personalPersonId String?          @db.Uuid
+  name             String           @db.VarChar(120)
+  scope            ExpenseScope     @default(HOUSEHOLD)
+  frequency        ExpenseFrequency
+  intervalMonths   Int?
+  intervalWeeks    Int?
+  usualDayOfMonth  Int?
+  nextExpectedDate DateTime         @db.Date
+  endDate          DateTime?        @db.Date
+  isActive         Boolean          @default(true)
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  household        Household        @relation(fields: [householdId], references: [id], onDelete: Restrict)
+  category         Category         @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  personalPerson   HouseholdPerson? @relation("PersonalInvoiceSchedule", fields: [personalPersonId], references: [id], onDelete: Restrict)
+  invoices         UtilityInvoice[]
+
+  @@index([householdId, isActive, nextExpectedDate])
+  @@index([categoryId])
+  @@index([personalPersonId])
 }

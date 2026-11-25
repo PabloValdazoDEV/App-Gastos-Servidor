@@ -18,6 +18,8 @@ import {
 } from '../../services/planningCalculator.service.js';
 import { calculateNextDueDate } from '../../services/recurrence.service.js';
 import { calculateFundingShortfall } from '../../services/fundingCheck.service.js';
+import { advanceScheduleAfterInvoice } from '../../services/invoiceSchedule.service.js';
+import { loadInvoiceForecasts, registerInvoiceScheduleRoutes } from './invoiceSchedules.js';
 import { sendSuccess } from '../../utils/httpResponses.js';
 import {
   HOUSEHOLD_ROLES,
@@ -190,6 +192,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
     [
       '/households/:householdId/recurring-expenses',
       '/households/:householdId/invoices',
+      '/households/:householdId/invoice-schedules',
       '/households/:householdId/variable-expenses',
       '/households/:householdId/balance',
       '/households/:householdId/budget',
@@ -630,17 +633,33 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
       await memberAccess(prisma, request);
       await requireHouseholdCategory(prisma, { householdId, categoryId: body.categoryId });
       await validateScope(prisma, householdId, body.scope, body.personalPersonId);
+      const schedule = body.scheduleId
+        ? await prisma.invoiceSchedule.findFirst({
+            where: { id: body.scheduleId, householdId, ...visibleExpenseWhere(request.auth.userId) },
+          })
+        : null;
+      if (body.scheduleId && !schedule) {
+        throw createDomainError(404, 'INVOICE_SCHEDULE_NOT_FOUND', 'No se encontró la factura periódica.');
+      }
       const invoice = await prisma.$transaction(async (database) => {
         const item = await database.utilityInvoice.create({
           data: {
             householdId,
             ...body,
+            scheduleId: body.scheduleId ?? null,
             personalPersonId: body.personalPersonId ?? null,
             chargeDate: body.chargeDate ?? null,
             notes: body.notes ?? null,
           },
           include: { category: true, personalPerson: true },
         });
+        if (schedule) {
+          // The real bill replaces this expected one: move to the next date.
+          await database.invoiceSchedule.update({
+            where: { id: schedule.id },
+            data: { nextExpectedDate: advanceScheduleAfterInvoice(schedule, body.invoiceDate) },
+          });
+        }
         await createAuditLog(database, {
           actorUserId: request.auth.userId,
           householdId,
@@ -1503,6 +1522,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
   );
 
   registerPlanningChangeRoutes(router, { prisma, requireCsrf, memberAccess });
+  registerInvoiceScheduleRoutes(router, { prisma, requireCsrf, memberAccess, requireHouseholdCategory, validateScope });
 
   router.get(
     '/households/:householdId/simulation',
@@ -1760,7 +1780,7 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
       for (let month = startOfMonth(rangeStart); month <= rangeEnd; month = addCalendarMonths(month, 1)) {
         periods.push({ year: month.getUTCFullYear(), month: month.getUTCMonth() + 1 });
       }
-      const [invoices, variableMonths, oneTimeExpenses] = await Promise.all([
+      const [invoices, variableMonths, oneTimeExpenses, invoiceForecasts] = await Promise.all([
         prisma.utilityInvoice.findMany({
           where: {
             ...visibleWhere,
@@ -1779,10 +1799,11 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
           where: { ...visibleWhere, expenseDate: dateRange },
           include,
         }),
+        loadInvoiceForecasts(prisma, { householdId, actorUserId: request.auth.userId, scope: query.scope }),
       ]);
       return sendSuccess(
         response,
-        buildCalendar({ recurringExpenses: expenses, payments, invoices, variableMonths, oneTimeExpenses,
+        buildCalendar({ recurringExpenses: expenses, payments, invoices, variableMonths, oneTimeExpenses, invoiceForecasts,
           purchaseSources: purchaseSources.filter((source) => !query.scope || source.scope === query.scope),
           today, view: query.view, anchorDate }),
       );

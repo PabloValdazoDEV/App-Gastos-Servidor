@@ -257,6 +257,8 @@ const invoiceBase = z.object({
   categoryId: uuid,
   amountCents: cents,
   ...scopeFields,
+  // The repeating bill this real bill belongs to; moves its next expected date.
+  scheduleId: uuid.nullable().optional(),
   periodStart: civilDate,
   periodEnd: civilDate,
   invoiceDate: civilDate,
@@ -282,6 +284,30 @@ export const updateInvoiceSchema = invoiceBase
   .extend({ ...updateScopeFields, paymentDate: civilDate.nullable().optional() })
   .strict()
   .refine((body) => Object.keys(body).length > 0, 'Indica algún dato para actualizar.');
+
+// A bill that repeats: same frequencies as recurring expenses, except one-off.
+export const invoiceScheduleSchema = z
+  .object({
+    categoryId: uuid,
+    name: nonEmptyText(120),
+    ...scopeFields,
+    ...recurringIntervalFields,
+    nextExpectedDate: civilDate,
+    endDate: civilDate.nullable().optional(),
+    isActive: z.boolean().optional(),
+  })
+  .strict()
+  .superRefine((body, context) => {
+    validateScope(body, context);
+    validateRecurringIntervals(body, context);
+    if (body.frequency === 'ONE_TIME') {
+      context.addIssue({ code: 'custom', path: ['frequency'], message: 'Una factura periódica tiene que repetirse.' });
+    }
+    if (body.endDate && body.endDate < body.nextExpectedDate) {
+      context.addIssue({ code: 'custom', path: ['endDate'], message: 'La fecha de fin no puede ser anterior a la próxima factura.' });
+    }
+  })
+  .transform((body) => ({ ...body, ...normalizeRecurringIntervals(body) }));
 
 export const invoiceQuerySchema = z
   .object({ categoryId: uuid.optional(), scope: expenseScope.optional() })
@@ -518,5 +544,6 @@ export const financeParamsSchema = z
     recoveryPlanId: uuid.optional(),
     planningId: uuid.optional(),
     extraId: uuid.optional(),
+    scheduleId: uuid.optional(),
   })
   .passthrough();
