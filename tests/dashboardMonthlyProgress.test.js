@@ -99,7 +99,10 @@ describe('Dashboard monthly progress integration', () => {
     const before = await read();
     expect(before.monthlyProgress.common).toMatchObject({ budgetCents: 110_000, usedCents: 58_000, remainingCents: 52_000 });
     state.oneOffs.push({ id: 'one-off', householdId: 'household', category,
-      scope: 'HOUSEHOLD', amountCents: 12_000, expenseDate: day('2026-09-17'), applySafetyMargin: false });
+      scope: 'HOUSEHOLD', amountCents: 12_000, expenseDate: day('2026-09-17'), applySafetyMargin: false, countsInBudget: true });
+    // A one-off marked "no contar en la previsión" stays out of the numbers.
+    state.oneOffs.push({ id: 'savings-one-off', householdId: 'household', category,
+      scope: 'HOUSEHOLD', amountCents: 50_000, expenseDate: day('2026-09-18'), applySafetyMargin: false, countsInBudget: false });
     const after = await read();
     expect(after.monthlyProgress.common).toMatchObject({ budgetCents: 122_000, usedCents: 58_000, remainingCents: 64_000 });
     expect(after.planning).not.toBeNull();

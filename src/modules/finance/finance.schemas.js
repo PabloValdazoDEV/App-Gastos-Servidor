@@ -327,6 +327,7 @@ export const budgetMarginPreferenceQuerySchema = z.object({
 export const createOneTimeExpenseSchema = z
   .object({
     applySafetyMargin: z.boolean().default(false),
+    countsInBudget: z.boolean().default(true),
     categoryId: uuid,
     name: nonEmptyText(120),
     amountCents: cents,
@@ -340,7 +341,7 @@ export const createOneTimeExpenseSchema = z
 
 export const updateOneTimeExpenseSchema = createOneTimeExpenseSchema
   .partial()
-  .extend({ ...updateScopeFields, applySafetyMargin: z.boolean().optional(), paymentDate: civilDate.nullable().optional() })
+  .extend({ ...updateScopeFields, applySafetyMargin: z.boolean().optional(), countsInBudget: z.boolean().optional(), paymentDate: civilDate.nullable().optional() })
   .strict()
   .refine((body) => Object.keys(body).length > 0, 'Indica algún dato para actualizar.');
 
@@ -517,6 +518,15 @@ export const recoveryPreviewSchema = z
       })
       .strict()
       .optional(),
+  })
+  .strict();
+
+// "Preparar el mes", step 2: the answers of step 1.
+export const fundingCheckQuerySchema = z
+  .object({
+    month: civilDate.optional(),
+    balanceCents: z.coerce.number().int().min(-2_147_483_648).max(2_147_483_647),
+    contributionDone: z.enum(['true', 'false']).transform((value) => value === 'true'),
   })
   .strict();
 

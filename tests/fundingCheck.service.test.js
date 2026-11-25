@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildFundingBasis, calculateFundingShortfall } from '../src/services/fundingCheck.service.js';
+import { buildFundingBasis, calculateFundingShortfall, recoveryOptions } from '../src/services/fundingCheck.service.js';
 import { pendingDueDates } from '../src/modules/finance/finance.service.js';
 
 const reserveLine = (overrides) => ({
@@ -73,5 +73,33 @@ describe('calculateFundingShortfall', () => {
     const result = calculateFundingShortfall(basis, { balanceCents: 200_000, contributionDone: true });
     expect(result.shortfallCents).toBe(0);
     expect(result.surplusCents).toBe(25_300);
+  });
+});
+
+describe('recoveryOptions', () => {
+  // Annual 600 € insurance due in March (4 months after November), 400 € saved.
+  const basis = {
+    reserveForLaterCents: 40_000,
+    reserveForLaterLines: [{ name: 'Seguro coche', dueDate: '2027-03-02', reserveCents: 40_000, targetAmountCents: 60_000, cycleDays: 365 }],
+  };
+
+  it('solo ofrece repartir en los meses que no dejan ningún pago sin cubrir', () => {
+    const options = recoveryOptions(basis, { shortfallCents: 30_000, calculationDate: '2026-11-01' });
+    expect(options.map(({ months, monthlyCents, safe }) => ({ months, monthlyCents, safe }))).toEqual([
+      { months: 2, monthlyCents: 15_000, safe: true },
+      { months: 3, monthlyCents: 10_000, safe: true },
+      { months: 6, monthlyCents: 5_000, safe: false },
+    ]);
+    expect(options[2].risk).toEqual({ name: 'Seguro coche', dueDate: '2027-03-02' });
+  });
+
+  it('si lo que falta son pagos de este mes, no se puede repartir', () => {
+    const options = recoveryOptions({ reserveForLaterCents: 0, reserveForLaterLines: [] }, { shortfallCents: 60_000, calculationDate: '2026-11-01' });
+    expect(options.every((option) => !option.safe)).toBe(true);
+    expect(options[0].risk).toEqual({ name: 'Los pagos de este mes', dueDate: null });
+  });
+
+  it('sin falta de dinero no hay opciones', () => {
+    expect(recoveryOptions(basis, { shortfallCents: 0, calculationDate: '2026-11-01' })).toEqual([]);
   });
 });

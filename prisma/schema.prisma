@@ -542,6 +542,8 @@ model OneTimeExpense {
   scope            ExpenseScope     @default(HOUSEHOLD)
   expenseDate      DateTime         @db.Date
   applySafetyMargin Boolean         @default(false)
+  // false: shown in the list and calendar but outside the forecast (paid from savings…).
+  countsInBudget   Boolean          @default(true)
   paidAt           DateTime?        @db.Date
   notes            String?          @db.VarChar(2000)
   createdAt        DateTime         @default(now())

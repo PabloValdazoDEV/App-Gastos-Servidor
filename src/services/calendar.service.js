@@ -205,6 +205,7 @@ export function buildCalendar({
       status: expense.paidAt ? 'PAID' : 'UNCONFIRMED',
       expectedAmountCents: expense.amountCents,
       actualAmountCents: expense.paidAt ? expense.amountCents : null,
+      countsInBudget: expense.countsInBudget !== false,
     }));
   const variableEvents = variableMonths.flatMap((month) => {
     if (month.entryMode === 'SUMMARY') {

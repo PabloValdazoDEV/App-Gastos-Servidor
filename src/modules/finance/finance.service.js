@@ -224,7 +224,8 @@ export async function loadFinancialInputs(database, householdId, actorUserId, ca
       }),
       database.oneTimeExpense?.findMany
         ? database.oneTimeExpense.findMany({
-            where: { householdId, ...visibleExpenseWhere(actorUserId) },
+            // A one-off marked "no contar" stays visible but outside every forecast.
+            where: { householdId, countsInBudget: true, ...visibleExpenseWhere(actorUserId) },
             include: {
               category: true,
               personalPerson: { select: { id: true, name: true } },

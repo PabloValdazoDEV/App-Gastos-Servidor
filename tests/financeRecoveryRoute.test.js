@@ -146,10 +146,57 @@ describe('finance recovery route', () => {
     expect(covered.body.code).toBe('NO_REAL_DEFICIT');
 
     // Already contributed and the account is empty: the whole 700 € are missing.
-    const short = await request(app)
+    // They are this month's payments, so spreading them over months is refused…
+    const atRisk = await request(app)
       .post(`/api/households/${householdId}/recovery-plans`)
       .send({ deficitCents: 1, mode: 'TARGET_MONTHS', targetMonths: 2, fundingCheck: { balanceCents: 0, contributionDone: true, month: '2026-02-01' } })
+      .expect(409);
+    expect(atRisk.body.code).toBe('RECOVERY_PUTS_PAYMENT_AT_RISK');
+    // …while the recommended plan still records the real 700 € shortfall.
+    const short = await request(app)
+      .post(`/api/households/${householdId}/recovery-plans`)
+      .send({ deficitCents: 1, mode: 'RECOMMENDED', startsOn: '2026-02-01', fundingCheck: { balanceCents: 0, contributionDone: true, month: '2026-02-01' } })
       .expect(201);
-    expect(short.body.data).toMatchObject({ initialDeficitCents: 70_000, monthlyAdjustmentCents: 35_000 });
+    expect(short.body.data).toMatchObject({ initialDeficitCents: 70_000 });
+  });
+
+  it('el asistente devuelve lo que falta, la parte de cada uno y solo permite repartir sin poner pagos en riesgo', async () => {
+    const household = { id: householdId, name: 'Casa', currentBalanceCents: 0, safetyMarginBps: 0, contributionMode: 'PERCENTAGE',
+      people: [{ id: personId, name: 'Persona', contributionBps: 10_000, isActive: true, archivedAt: null }] };
+    const monthly = { id: '20000000-0000-4000-8000-000000000005', householdId, name: 'Mensual', amountCents: 10_000, scope: 'HOUSEHOLD',
+      frequency: 'MONTHLY', intervalMonths: null, startDate: new Date('2026-01-01T00:00:00.000Z'), nextDueDate: new Date('2026-02-20T00:00:00.000Z'),
+      isActive: true, archivedAt: null, safetyMarginOverrideBps: null, category: { safetyMarginBps: null }, personalPerson: null };
+    const prisma = {
+      householdUserAccess: { findFirst: vi.fn().mockResolvedValue({ role: 'MEMBER', household: { id: householdId, isActive: true, ownerUserId: null } }) },
+      household: { findUnique: vi.fn().mockResolvedValue(household) },
+      recurringExpense: { findMany: vi.fn().mockResolvedValue([monthly]) },
+      utilityInvoice: { findMany: vi.fn().mockResolvedValue([]) },
+      budgetMarginPreference: { findMany: vi.fn().mockResolvedValue([]) },
+      variableExpenseMonth: { findMany: vi.fn().mockResolvedValue([]) },
+      monthlyPlanning: { findUnique: vi.fn().mockResolvedValue(null) },
+      recoveryPlan: { findFirst: vi.fn().mockResolvedValue(null), updateMany: vi.fn(), create: vi.fn() },
+      expensePayment: { findMany: vi.fn().mockResolvedValue([]) },
+      $transaction: vi.fn(async (callback) => callback(prisma)),
+      auditLog: { create: vi.fn() },
+    };
+    const app = express();
+    app.use(express.json());
+    app.use('/api', createFinanceRouter({ prisma, authenticate, requireCsrf }));
+    app.use((error, _request, response, _next) => response.status(error.statusCode ?? 500).json({ code: error.code ?? 'INTERNAL_ERROR', message: error.message }));
+
+    const check = await request(app)
+      .get(`/api/households/${householdId}/plannings/funding-check`)
+      .query({ month: '2026-02-01', balanceCents: 0, contributionDone: 'true' })
+      .expect(200);
+    // 100 € due this month and nothing in the account: only this month's payment is missing.
+    expect(check.body.data).toMatchObject({ neededCents: 10_000, shortfallCents: 10_000, shares: [{ personId, amountCents: 10_000 }] });
+    expect(check.body.data.options.every((option) => !option.safe)).toBe(true);
+
+    const rejected = await request(app)
+      .post(`/api/households/${householdId}/recovery-plans`)
+      .send({ deficitCents: 10_000, mode: 'TARGET_MONTHS', targetMonths: 2, fundingCheck: { balanceCents: 0, contributionDone: true, month: '2026-02-01' } })
+      .expect(409);
+    expect(rejected.body.code).toBe('RECOVERY_PUTS_PAYMENT_AT_RISK');
+    expect(prisma.recoveryPlan.create).not.toHaveBeenCalled();
   });
 });

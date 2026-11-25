@@ -17,7 +17,8 @@ import {
   recoveryAdjustmentForMonth,
 } from '../../services/planningCalculator.service.js';
 import { calculateNextDueDate } from '../../services/recurrence.service.js';
-import { calculateFundingShortfall } from '../../services/fundingCheck.service.js';
+import { calculateFundingShortfall, recoveryOptions } from '../../services/fundingCheck.service.js';
+import { splitAmount } from '../../services/money.service.js';
 import { advanceScheduleAfterInvoice } from '../../services/invoiceSchedule.service.js';
 import { loadInvoiceForecasts, registerInvoiceScheduleRoutes } from './invoiceSchedules.js';
 import { sendSuccess } from '../../utils/httpResponses.js';
@@ -57,6 +58,7 @@ import {
   variableExpensePaymentSchema,
   upsertVariableMonthSchema,
   variableQuerySchema,
+  fundingCheckQuerySchema,
 } from './finance.schemas.js';
 import {
   calculateDashboard,
@@ -1521,6 +1523,31 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
     }),
   );
 
+  // "Preparar el mes", step 2: what is missing with the user's answers, the
+  // share of each person and which spreading options keep every payment safe.
+  router.get(
+    '/households/:householdId/plannings/funding-check',
+    asyncRoute(async (request, response) => {
+      const { householdId } = financeParamsSchema.parse(request.params);
+      const query = fundingCheckQuerySchema.parse(request.query);
+      await memberAccess(prisma, request);
+      const dashboard = await calculateDashboard(prisma, householdId, query.month, undefined, request.auth.userId);
+      const basis = dashboard.fundingBasis;
+      const result = calculateFundingShortfall(basis, query);
+      const contributors = basis.contributions.filter((item) => item.contributionBps > 0);
+      return sendSuccess(response, {
+        ...result,
+        basis,
+        // Only with a complete distribution (100 %); otherwise the budget is not ready.
+        shares: result.shortfallCents > 0 && contributors.reduce((sum, item) => sum + item.contributionBps, 0) === 10_000
+          ? splitAmount(result.shortfallCents, contributors.map((item) => ({ id: item.personId, contributionBps: item.contributionBps })))
+            .map(({ id, amountCents }) => ({ personId: id, personName: contributors.find((item) => item.personId === id).personName, amountCents }))
+          : [],
+        options: recoveryOptions(basis, { shortfallCents: result.shortfallCents, calculationDate: dashboard.calculationDate }),
+      });
+    }),
+  );
+
   registerPlanningChangeRoutes(router, { prisma, requireCsrf, memberAccess });
   registerInvoiceScheduleRoutes(router, { prisma, requireCsrf, memberAccess, requireHouseholdCategory, validateScope });
 
@@ -1619,6 +1646,20 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
           request.auth.userId,
         );
         deficitCents = calculateFundingShortfall(dashboard.fundingBasis, body.fundingCheck).shortfallCents;
+        // Spreading is only allowed when no payment is left uncovered.
+        if (deficitCents > 0 && body.mode === 'TARGET_MONTHS') {
+          const [option] = recoveryOptions(dashboard.fundingBasis, {
+            shortfallCents: deficitCents, calculationDate: dashboard.calculationDate, months: [body.targetMonths],
+          });
+          if (!option.safe) {
+            throw createDomainError(
+              409,
+              'RECOVERY_PUTS_PAYMENT_AT_RISK',
+              `Repartirlo en ${body.targetMonths} meses dejaría sin cubrir ${option.risk.dueDate ? `«${option.risk.name}» del ${option.risk.dueDate}` : 'los pagos de este mes'}. Elige menos meses o apórtalo ahora.`,
+              { risk: option.risk },
+            );
+          }
+        }
       } else {
         const realSituation = await calculateHouseholdSimulation(
           prisma,
