@@ -3,7 +3,40 @@ import { createDomainError } from '../household-domain/domainError.js';
 export const CONTRIBUTION_MODES = Object.freeze({
   PERCENTAGE: 'PERCENTAGE',
   FIXED: 'FIXED',
+  // Split in proportion to each person's gross annual income.
+  INCOME: 'INCOME',
 });
+
+const isActivePerson = (person) => person.isActive && person.archivedAt === null;
+
+/*
+ * Percentages (basis points) proportional to gross annual income, summing
+ * exactly 100 %: largest remainder, ties by list order. People who do not
+ * take part get 0. Returns null when no active person has a valid income.
+ */
+export const incomeShareBps = (people) => {
+  const active = people.filter(isActivePerson);
+  if (active.some((person) => !Number.isInteger(person.annualGrossIncomeCents) || person.annualGrossIncomeCents < 0)) {
+    return null;
+  }
+  const total = active.reduce((sum, person) => sum + BigInt(person.annualGrossIncomeCents), 0n);
+  if (total === 0n) return null;
+  const shares = active.map((person, index) => {
+    const numerator = BigInt(person.annualGrossIncomeCents) * 10000n;
+    return { id: person.id, index, bps: Number(numerator / total), remainder: numerator % total };
+  });
+  let missing = 10000 - shares.reduce((sum, share) => sum + share.bps, 0);
+  [...shares]
+    .sort((left, right) => (right.remainder > left.remainder ? 1 : right.remainder < left.remainder ? -1 : left.index - right.index))
+    .forEach((share) => {
+      if (missing > 0) {
+        share.bps += 1;
+        missing -= 1;
+      }
+    });
+  const byId = new Map(shares.map((share) => [share.id, share.bps]));
+  return new Map(people.map((person) => [person.id, byId.get(person.id) ?? 0]));
+};
 
 const invalidDistribution = (message, details) =>
   createDomainError(
@@ -66,6 +99,26 @@ export const validateContributionDistribution = (mode, people) => {
       totalContributionBps,
       totalFixedContributionCents: 0,
     };
+  }
+
+  if (mode === CONTRIBUTION_MODES.INCOME) {
+    const invalidPerson = activePeople.find(
+      (person) => !Number.isInteger(person.annualGrossIncomeCents) || person.annualGrossIncomeCents < 0,
+    );
+    if (invalidPerson) {
+      throw invalidDistribution(
+        'Indica el sueldo bruto anual de cada persona que participa.',
+        [{ field: 'annualGrossIncomeCents', personId: invalidPerson.id }],
+      );
+    }
+    if (!incomeShareBps(people)) {
+      throw invalidDistribution(
+        'La suma de los sueldos brutos anuales tiene que ser mayor que cero.',
+        [{ field: 'annualGrossIncomeCents' }],
+      );
+    }
+    const totalContributionBps = activePeople.reduce((total, person) => total + person.contributionBps, 0);
+    return { mode, activePeople: activePeople.length, totalContributionBps, totalFixedContributionCents: 0 };
   }
 
   if (mode === CONTRIBUTION_MODES.FIXED) {

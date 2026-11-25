@@ -14,6 +14,7 @@ const personFields = {
   email: emailSchema.nullable().optional(),
   contributionBps: percentageBpsSchema.optional(),
   fixedContributionCents: moneyCentsSchema.nullable().optional(),
+  annualGrossIncomeCents: moneyCentsSchema.nullable().optional(),
   isActive: z.boolean().optional(),
 };
 
@@ -45,6 +46,7 @@ const contributionUpdateSchema = z
     isActive: z.boolean().optional(),
     contributionBps: percentageBpsSchema.optional(),
     fixedContributionCents: moneyCentsSchema.nullable().optional(),
+    annualGrossIncomeCents: moneyCentsSchema.nullable().optional(),
   })
   .strict()
   .refine(
@@ -54,7 +56,7 @@ const contributionUpdateSchema = z
 
 export const updateDistributionBodySchema = z
   .object({
-    contributionMode: z.enum(['PERCENTAGE', 'FIXED']).optional(),
+    contributionMode: z.enum(['PERCENTAGE', 'FIXED', 'INCOME']).optional(),
     people: z.array(contributionUpdateSchema).min(1).max(100),
   })
   .strict()

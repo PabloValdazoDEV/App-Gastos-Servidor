@@ -7,7 +7,7 @@ import {
   requireHouseholdPerson,
   requireHouseholdRole,
 } from '../households/authorization.js';
-import { validateContributionDistribution } from '../households/distribution.js';
+import { CONTRIBUTION_MODES, incomeShareBps, validateContributionDistribution } from '../households/distribution.js';
 import { businessToday } from '../../services/businessClock.service.js';
 import { startOfMonth } from '../../services/date.service.js';
 
@@ -40,6 +40,22 @@ const getDistributionPeople = (database, householdId) =>
     where: { householdId, archivedAt: null },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
   });
+
+// With the "gross annual income" split, percentages are derived from incomes
+// every time people or incomes change; the budget keeps reading contributionBps.
+const syncIncomeShares = async (database, householdId, mode) => {
+  const people = await getDistributionPeople(database, householdId);
+  if (mode !== CONTRIBUTION_MODES.INCOME) return people;
+  const shares = incomeShareBps(people);
+  if (!shares) return people;
+  for (const person of people) {
+    const bps = shares.get(person.id) ?? 0;
+    if (person.contributionBps !== bps) {
+      await database.householdPerson.update({ where: { id: person.id }, data: { contributionBps: bps } });
+    }
+  }
+  return people.map((person) => ({ ...person, contributionBps: shares.get(person.id) ?? 0 }));
+};
 
 const auditPersonChange = (
   database,
@@ -183,6 +199,7 @@ export const createPeopleService = ({ prisma }) => {
           linkedUserId: true,
           contributionBps: true,
           fixedContributionCents: true,
+          annualGrossIncomeCents: true,
           isActive: true,
           archivedAt: true,
           createdAt: true,
@@ -191,9 +208,11 @@ export const createPeopleService = ({ prisma }) => {
         orderBy: [{ isActive: 'desc' }, { createdAt: 'asc' }, { id: 'asc' }],
       });
 
+      // Gross salaries are sensitive: only owners and admins (who edit the split) see them.
+      const canSeeIncome = [HOUSEHOLD_ROLES.OWNER, HOUSEHOLD_ROLES.ADMIN].includes(access.role);
       return {
         contributionMode: access.household.contributionMode,
-        people,
+        people: canSeeIncome ? people : people.map(({ annualGrossIncomeCents: _hidden, ...person }) => person),
       };
     },
 
@@ -221,7 +240,7 @@ export const createPeopleService = ({ prisma }) => {
               isActive: input.isActive,
             },
           });
-          const people = await getDistributionPeople(tx, householdId);
+          const people = await syncIncomeShares(tx, householdId, access.household.contributionMode);
           validateContributionDistribution(
             access.household.contributionMode,
             people,
@@ -270,7 +289,7 @@ export const createPeopleService = ({ prisma }) => {
             where: { id: personId },
             data: input,
           });
-          const people = await getDistributionPeople(tx, householdId);
+          const people = await syncIncomeShares(tx, householdId, access.household.contributionMode);
           validateContributionDistribution(
             access.household.contributionMode,
             people,
@@ -340,7 +359,7 @@ export const createPeopleService = ({ prisma }) => {
 
         const contributionMode =
           input.contributionMode ?? access.household.contributionMode;
-        const people = await getDistributionPeople(tx, householdId);
+        const people = await syncIncomeShares(tx, householdId, contributionMode);
         const totals = validateContributionDistribution(
           contributionMode,
           people,
@@ -390,9 +409,10 @@ export const createPeopleService = ({ prisma }) => {
             archivedAt: new Date(),
             contributionBps: 0,
             fixedContributionCents: null,
+            annualGrossIncomeCents: null,
           },
         });
-        const people = await getDistributionPeople(tx, householdId);
+        const people = await syncIncomeShares(tx, householdId, access.household.contributionMode);
         validateContributionDistribution(
           access.household.contributionMode,
           people,
