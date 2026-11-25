@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { CONTRIBUTION_MODES, incomeShareBps, validateContributionDistribution } from '../src/modules/households/distribution.js';
 import { createPeopleService } from '../src/modules/people/people.service.js';
+import { getBudgetReadiness } from '../src/modules/finance/finance.service.js';
 
 const household = '50000000-0000-4000-8000-000000000001';
 const owner = '50000000-0000-4000-8000-000000000002';
@@ -76,5 +77,11 @@ describe('reparto según el sueldo bruto anual', () => {
     const listed = await createPeopleService({ prisma }).list({ actorUserId: owner, householdId: household });
     expect(listed.people[0]).not.toHaveProperty('annualGrossIncomeCents');
     expect(listed.people[0].contributionBps).toBe(5000);
+  });
+
+  it('el presupuesto está listo con el reparto por sueldo, igual que con porcentajes', () => {
+    const people = [person(ana, { contributionBps: 6000 }), person(luis, { contributionBps: 4000 })];
+    expect(getBudgetReadiness({ contributionMode: 'INCOME', people }).ready).toBe(true);
+    expect(getBudgetReadiness({ contributionMode: 'FIXED', people }).missing).toContain('PERCENTAGE_MODE');
   });
 });

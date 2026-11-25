@@ -316,7 +316,8 @@ export function getBudgetReadiness(household) {
   const missing = [];
 
   if (people.length === 0) missing.push('PEOPLE');
-  if (household?.contributionMode !== 'PERCENTAGE') {
+  // Both modes end in percentages: INCOME derives them from gross salaries.
+  if (!['PERCENTAGE', 'INCOME'].includes(household?.contributionMode)) {
     missing.push('PERCENTAGE_MODE');
   } else if (people.length > 0 && percentageTotal !== 10_000) {
     missing.push('CONTRIBUTION_DISTRIBUTION');
