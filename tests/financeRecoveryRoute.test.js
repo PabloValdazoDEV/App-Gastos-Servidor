@@ -127,5 +127,29 @@ describe('finance recovery route', () => {
       .expect(409);
     expect(created.body.code).toBe('NO_REAL_DEFICIT');
     expect(prisma.recoveryPlan.create).not.toHaveBeenCalled();
+
+    // "Preparar el mes": the shortfall follows the answers of step 1, with the
+    // month's real data, not the household's stored balance.
+    prisma.monthlyPlanning = { findUnique: vi.fn().mockResolvedValue(null) };
+    prisma.recoveryPlan.findFirst = vi.fn().mockResolvedValue(null);
+    prisma.expensePayment = { findMany: vi.fn().mockResolvedValue([]) };
+    prisma.$transaction = vi.fn(async (callback) => callback(prisma));
+    prisma.recoveryPlan.create = vi.fn(async ({ data }) => ({ id: 'plan-1', ...data }));
+    prisma.auditLog = { create: vi.fn() };
+
+    // February needs 700 € (100 € monthly + 600 € one-off). With 600 € in the
+    // account and the 100 € contribution still to come, nothing is missing.
+    const covered = await request(app)
+      .post(`/api/households/${householdId}/recovery-plans`)
+      .send({ deficitCents: 1, mode: 'TARGET_MONTHS', targetMonths: 2, fundingCheck: { balanceCents: 60_000, contributionDone: false, month: '2026-02-01' } })
+      .expect(409);
+    expect(covered.body.code).toBe('NO_REAL_DEFICIT');
+
+    // Already contributed and the account is empty: the whole 700 € are missing.
+    const short = await request(app)
+      .post(`/api/households/${householdId}/recovery-plans`)
+      .send({ deficitCents: 1, mode: 'TARGET_MONTHS', targetMonths: 2, fundingCheck: { balanceCents: 0, contributionDone: true, month: '2026-02-01' } })
+      .expect(201);
+    expect(short.body.data).toMatchObject({ initialDeficitCents: 70_000, monthlyAdjustmentCents: 35_000 });
   });
 });

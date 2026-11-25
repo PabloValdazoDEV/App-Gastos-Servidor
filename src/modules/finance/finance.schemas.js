@@ -482,6 +482,15 @@ export const recoveryPreviewSchema = z
     maximumMonthlyCents: cents.nullable().optional(),
     startsOn: civilDate.optional(),
     monthlyPlanningId: uuid.nullable().optional(),
+    // "Preparar el mes": recompute the shortfall from the answers of step 1.
+    fundingCheck: z
+      .object({
+        balanceCents: z.number().int().min(-2_147_483_648).max(2_147_483_647),
+        contributionDone: z.boolean(),
+        month: civilDate.optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

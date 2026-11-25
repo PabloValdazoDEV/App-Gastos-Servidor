@@ -17,6 +17,7 @@ import {
   recoveryAdjustmentForMonth,
 } from '../../services/planningCalculator.service.js';
 import { calculateNextDueDate } from '../../services/recurrence.service.js';
+import { calculateFundingShortfall } from '../../services/fundingCheck.service.js';
 import { sendSuccess } from '../../utils/httpResponses.js';
 import {
   HOUSEHOLD_ROLES,
@@ -1584,16 +1585,30 @@ export const createFinanceRouter = ({ prisma, authenticate, requireCsrf }) => {
           budget.readiness,
         );
       }
-      // The deficit is always recomputed from today's real data. A simulation
-      // with a hypothetical date or balance must never create a real plan.
-      const realSituation = await calculateHouseholdSimulation(
-        prisma,
-        householdId,
-        undefined,
-        undefined,
-        request.auth.userId,
-      );
-      const deficitCents = realSituation.deficitCents ?? 0;
+      // The deficit is always recomputed on the server. A simulation with a
+      // hypothetical date or balance must never create a real plan.
+      let deficitCents;
+      if (body.fundingCheck) {
+        // From "Preparar el mes": same calculation the user just saw, with the
+        // real month data and the balance/contribution answers of step 1.
+        const dashboard = await calculateDashboard(
+          prisma,
+          householdId,
+          body.fundingCheck.month,
+          undefined,
+          request.auth.userId,
+        );
+        deficitCents = calculateFundingShortfall(dashboard.fundingBasis, body.fundingCheck).shortfallCents;
+      } else {
+        const realSituation = await calculateHouseholdSimulation(
+          prisma,
+          householdId,
+          undefined,
+          undefined,
+          request.auth.userId,
+        );
+        deficitCents = realSituation.deficitCents ?? 0;
+      }
       if (deficitCents <= 0) {
         throw createDomainError(
           409,

@@ -13,7 +13,9 @@ import {
   calculateFinancialStatus,
   calculateSimulation,
   calculateTheoreticalReserve,
+  recoveryAdjustmentForMonth,
 } from '../../services/planningCalculator.service.js';
+import { buildFundingBasis } from '../../services/fundingCheck.service.js';
 
 const recurringInclude = Object.freeze({
   category: true,
@@ -625,6 +627,18 @@ export async function calculateDashboard(
     }
   }
 
+  // "Preparar el mes": joint needs vs. what the account will have.
+  const fundingBasis = buildFundingBasis({
+    calculationDate: date,
+    pendingThisMonthCents: monthlyOverview.common?.remainingCents,
+    reserveLines: reserve.lines,
+    recurringExpenses: inputs.recurringExpenses,
+    pendingDueDatesFor: pendingDueDates,
+    plannedContributionCents: (budget.householdBudgetCents ?? 0)
+      + (activeRecoveryPlan ? recoveryAdjustmentForMonth(activeRecoveryPlan, startOfMonth(date)) : 0),
+    contributions: budget.contributions ?? [],
+  });
+
   return {
     household: {
       id: inputs.household.id,
@@ -638,6 +652,7 @@ export async function calculateDashboard(
     // Lets the home screen show the viewer's own contribution first.
     viewerPersonId: viewerPersonId ?? null,
     monthlyOverview,
+    fundingBasis,
     ...progress,
     budget,
     balanceCents,
