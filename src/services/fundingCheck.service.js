@@ -1,4 +1,4 @@
-import { compareCivilDates, endOfMonth, startOfMonth, toCivilDate } from './date.service.js';
+import { addCalendarDays, compareCivilDates, differenceInCalendarDays, endOfMonth, startOfMonth, toCivilDate } from './date.service.js';
 
 /*
  * "Preparar el mes": what the joint account needs this month versus what it
@@ -20,11 +20,19 @@ export function buildFundingBasis({
   plannedContributionCents,
   contributions = [],
 }) {
-  const monthStart = startOfMonth(toCivilDate(calculationDate));
+  const date = toCivilDate(calculationDate);
+  const monthStart = startOfMonth(date);
   const monthEnd = endOfMonth(monthStart);
-  const reserveForLater = reserveLines.filter(
-    (line) => !line.overdue && compareCivilDates(line.dueDate, monthEnd) > 0,
-  );
+  // This month's contribution already carries this month's saving for big
+  // charges, so the target is what should be saved by the END of the month.
+  const daysToMonthEnd = differenceInCalendarDays(addCalendarDays(monthEnd, 1), date);
+  const reserveForLater = reserveLines
+    .filter((line) => !line.overdue && compareCivilDates(line.dueDate, monthEnd) > 0)
+    .map((line) => {
+      if (!line.totalDays || !Number.isInteger(line.elapsedDays)) return line;
+      const elapsedAtMonthEnd = Math.min(line.totalDays, line.elapsedDays + daysToMonthEnd);
+      return { ...line, reserveCents: Math.round((line.targetAmountCents * elapsedAtMonthEnd) / line.totalDays) };
+    });
   const overdueCents = recurringExpenses
     .filter((expense) => expense.scope === 'HOUSEHOLD' && expense.isActive !== false && !expense.archivedAt)
     .reduce((sum, expense) => {

@@ -31,6 +31,28 @@ describe('buildFundingBasis', () => {
     expect(basis.contributions).toEqual([{ personId: 'a', personName: 'A', contributionBps: 5_000 }]);
   });
 
+  it('el ahorro para pagos grandes es el que debería haber a final de mes', () => {
+    // Annual 360 € insurance, cycle of 365 days, 320 elapsed on 1 December.
+    const basis = buildFundingBasis({
+      ...base,
+      reserveLines: [reserveLine({ dueDate: '2027-01-15', reserveCents: 31_562, targetAmountCents: 36_000, totalDays: 365, elapsedDays: 320 })],
+      calculationDate: '2026-12-01',
+    });
+    // 320 + 31 days of December = 351 / 365 of 360 €.
+    expect(basis.reserveForLaterCents).toBe(34_619);
+  });
+
+  it('sin falta de dinero ningún pago queda en riesgo aunque venza el mes siguiente', () => {
+    const basis = buildFundingBasis({
+      ...base,
+      reserveLines: [reserveLine({ dueDate: '2027-01-15', reserveCents: 31_562, targetAmountCents: 36_000, totalDays: 365, elapsedDays: 320 })],
+      calculationDate: '2026-12-01',
+    });
+    // A tiny shortfall over 2 months: January's provision completes the insurance.
+    const [twoMonths] = recoveryOptions(basis, { shortfallCents: 1_000, calculationDate: '2026-12-01', months: [2] });
+    expect(twoMonths.safe).toBe(true);
+  });
+
   it('cuenta los atrasados comunes de meses anteriores, no los personales ni los de este mes', () => {
     const basis = buildFundingBasis({
       ...base,
